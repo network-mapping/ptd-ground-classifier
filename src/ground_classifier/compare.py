@@ -1,6 +1,6 @@
 """Compare two sets of classified LAS/LAZ outputs point by point.
 
-    python compare_ground_outputs.py <A> <B> [<reference>]
+    ground-classify compare <A> <B> [<reference>]
 
 <A> and <B> are folders (or single files) holding the same tiles classified
 two different ways, for example with and without an optional stage. Files
@@ -32,7 +32,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         f"Missing Python package: {getattr(exc, 'name', exc)}. Run this with "
-        "the same Python that runs the classifier (Compare_Outputs.bat does)."
+        "the environment you installed the classifier into (make venv)."
     ) from exc
 
 SUFFIX = "_AdaptiveGround"
@@ -81,18 +81,19 @@ def describe_gap(label: str, gap: tuple[float, float, float, int] | None) -> str
     )
 
 
-def main() -> int:
-    if len(sys.argv) not in (3, 4):
+def main(argv: list[str] | None = None) -> int:
+    argv = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
+    if len(argv) not in (2, 3):
         print(__doc__)
         return 2
-    a_files, b_files = collect(Path(sys.argv[1])), collect(Path(sys.argv[2]))
-    reference = collect(Path(sys.argv[3])) if len(sys.argv) == 4 else {}
+    a_files, b_files = collect(Path(argv[0])), collect(Path(argv[1]))
+    reference = collect(Path(argv[2])) if len(argv) == 3 else {}
     common = sorted(set(a_files) & set(b_files))
     if not common:
         raise SystemExit("No tiles with the same name were found in both A and B.")
-    print(f"A = {sys.argv[1]}\nB = {sys.argv[2]}")
+    print(f"A = {argv[0]}\nB = {argv[1]}")
     if reference:
-        print(f"reference = {sys.argv[3]}")
+        print(f"reference = {argv[2]}")
     total_points = total_changed = total_a = total_b = 0
     for key in common:
         a, b = laspy.read(a_files[key]), laspy.read(b_files[key])

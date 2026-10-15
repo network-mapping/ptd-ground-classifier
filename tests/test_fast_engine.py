@@ -1,9 +1,8 @@
-"""Checks of the compiled core. usage: test_engine.py [clips_dir]"""
+"""Checks of the compiled core. usage: python tests/test_fast_engine.py [clips_dir]"""
 import sys, os, numpy as np
-here = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, here)
-import fast_ground as fg
+from ground_classifier import fast_ground as fg
 lib = fg.load_library()
-other = os.path.join(here, "libptdcore_clang.so"); lib2 = fg.load_library(other) if os.path.exists(other) else None
+lib2 = None
 fails = 0
 def ok(name, cond, note=""):
     global fails

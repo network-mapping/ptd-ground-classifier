@@ -87,13 +87,24 @@ class _State(ctypes.Structure):
     ]
 
 
-CORE_VERSION = 10   # must equal PTD_VERSION in ptdcore.c
+CORE_VERSION = 10   # must equal PTD_VERSION in native/ptdcore.c
+CORE_PATH_ENV_VAR = "GROUND_CLASSIFIER_CORE"
 _LIB = None
 
 
 def library_path():
+    """The compiled core: $GROUND_CLASSIFIER_CORE, else <repo>/build/ (made by native/build.sh)."""
+    override = os.environ.get(CORE_PATH_ENV_VAR)
+    if override:
+        return override
+    if sys.platform == "win32":
+        name = "ptdcore.dll"
+    elif sys.platform == "darwin":
+        name = "libptdcore.dylib"
+    else:
+        name = "libptdcore.so"
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "ptdcore.dll" if sys.platform == "win32" else "libptdcore.so")
+    return os.path.normpath(os.path.join(here, "..", "..", "build", name))
 
 
 def load_library(path=None):
@@ -103,7 +114,7 @@ def load_library(path=None):
         return _LIB
     path = path or library_path()
     if not os.path.exists(path):
-        raise OSError(f"compiled core not found: {path}")
+        raise OSError(f"compiled core not found: {path} (run `make build`)")
     lib = ctypes.CDLL(path)
     try:
         lib.ptd_version.argtypes = []; lib.ptd_version.restype = ctypes.c_int64
@@ -111,7 +122,7 @@ def load_library(path=None):
     except AttributeError:
         version = -1
     if version != CORE_VERSION:
-        raise OSError(f"compiled core is version {version}, this script needs {CORE_VERSION} (rebuild it from ptdcore.c)")
+        raise OSError(f"compiled core is version {version}, this script needs {CORE_VERSION} (run `make build`)")
     state = ctypes.POINTER(_State)
     lib.ptd_run.argtypes = [state, ctypes.c_int64]; lib.ptd_run.restype = ctypes.c_int
     lib.ptd_heights.argtypes = [state, _f32p]; lib.ptd_heights.restype = None
@@ -125,7 +136,7 @@ def load_library(path=None):
     lib.ptd_check.argtypes = [state]; lib.ptd_check.restype = ctypes.c_int64
     lib.ptd_state_size.argtypes = []; lib.ptd_state_size.restype = ctypes.c_int64
     if lib.ptd_state_size() != ctypes.sizeof(_State):
-        raise OSError("compiled core does not match this script (rebuild it from ptdcore.c)")
+        raise OSError("compiled core does not match this script (run `make build`)")
     _self_test(lib)
     if path == library_path():
         _LIB = lib

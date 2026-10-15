@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ground-classifier"
+dynamic = ["version"]
+description = "Ground classification of LAS/LAZ point clouds by progressive TIN densification"
+requires-python = ">=3.10"
+dependencies = [
+    "laspy[lazrs]>=2.5",
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.scripts]
+ground-classify = "ground_classifier.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "ground_classifier.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

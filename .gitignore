@@ -1,7 +1,9 @@
-# Data
+# Data (read-only inputs and TerraScan benchmark) and our outputs
 data/
+output/
 
-# Compiled artifacts (built by build_core.sh)
+# Compiled artifacts (built by native/build.sh)
+build/
 *.so
 *.dll
 *.dylib

@@ -7,13 +7,8 @@ it showing up here. This is the harness discipline the project needs:
 every parameter change gets checked against every terrain type, every time.
 
 Usage:
-    python3 validate_suite.py <module_name>
-
-<module_name> must be importable (its .py file's directory needs to be on
-sys.path before this runs) and expose the same classify_block(x, y, z,
-initial_classification, global_origin) signature as the production script.
+    python tests/validation/validate_suite.py
 """
-import sys
 import time
 from pathlib import Path
 import numpy as np
@@ -33,9 +28,8 @@ def run_one(mod, path):
         data["x"], data["y"], data["z"],
         data["c_input"], data["c_terra"], data["core_mask"],
     )
-    global_origin = (float(x.min()), float(y.min()))
     t0 = time.perf_counter()
-    classification, hag, model = mod.classify_block(x, y, z, c_input, global_origin)
+    classification, hag, model = mod.classify_block(x, y, z, c_input)
     elapsed = time.perf_counter() - t0
 
     classification = classification[core_mask]
@@ -87,12 +81,11 @@ def run_suite(mod, label=""):
 
 
 if __name__ == "__main__":
-    import importlib
-    # Default: the classifier one directory up (delivered layout is
-    # adaptive_ground_classifier_unified.py next to a validation_suite/ folder).
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    mod_name = sys.argv[1] if len(sys.argv) > 1 else "adaptive_ground_classifier_unified"
-    mod = importlib.import_module(mod_name)
-    if hasattr(mod, "configure_runtime"):
-        mod.configure_runtime(kdtree_workers=1)
-    run_suite(mod, label=mod_name)
+    from ground_classifier import pipeline
+    from ground_classifier.config import load_run_config, resolve_config_dir
+
+    config = load_run_config(resolve_config_dir())
+    pipeline.configure_engine_settings(config.engine_settings)
+    pipeline.configure_hag_bands(*config.hag_bands)
+    pipeline.configure_runtime(kdtree_workers=1)
+    run_suite(pipeline, label="ground_classifier.pipeline")

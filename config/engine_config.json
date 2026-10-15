@@ -1,0 +1,13 @@
+{
+  "_comment": "Fast-engine settings, all in METRES and degrees whatever the project unit. The first seven carry the names of TerraScan's Ground routine settings. max_building_size: one starting point per square of this size; lower it (20 to 30) on hilly projects where buildings are already in their own class. steep_iteration_angle: used on steep ground (iteration_angle is used on flat ground). ground_band: points this close to the ground surface are ground too, at most one per 0.3 m square; 0 = surface points only. follow_surface: let the ground continue over hill tops, banks and ridges the plain routine cannot climb. remove_spikes: take single points that stand out of the surface back out.",
+  "max_building_size": 60.0,
+  "terrain_angle": 70.0,
+  "iteration_angle": 6.0,
+  "steep_iteration_angle": 10.0,
+  "iteration_distance": 1.4,
+  "reduce_iteration_angle_when_edge_shorter_than": 2.0,
+  "stop_triangulation_when_edge_shorter_than": 0.0,
+  "ground_band": 0.02,
+  "follow_surface": true,
+  "remove_spikes": true
+}
