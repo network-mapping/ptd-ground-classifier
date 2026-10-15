@@ -1,0 +1,4 @@
+{
+  "_comment": "Input coordinate unit for LAS/LAZ files in this folder. 'auto' (default) reads each file's own CRS metadata and only proceeds when the unit is unambiguous; the tool refuses to guess rather than silently corrupt output. If a file has no CRS metadata (common - many production LAS files omit it), set this to 'usft' or 'metres' explicitly for this folder. This setting applies to every file processed from this folder in one run - keep files of different units in separate folders.",
+  "units": "usft"
+}

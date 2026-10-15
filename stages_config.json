@@ -1,0 +1,4 @@
+{
+  "_comment": "Optional stages. true = standard output (default). Setting a stage to false CHANGES THE RESULT - test on a few tiles and compare (Compare_Outputs.bat) before using it on a delivery. two_sided_bank_crest_membership: the final pass that adds extra class-2 points on banks and crests. It never changes the terrain model or any height above ground, only whether those points are labelled ground (2) or low vegetation (3). It is the most expensive stage: more than half of the processing time on dense data.",
+  "two_sided_bank_crest_membership": true
+}

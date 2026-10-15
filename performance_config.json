@@ -1,0 +1,5 @@
+{
+  "_comment": "Speed settings only - neither changes any classification result. ram_limit_gb: RAM budget in GB for files processed at the same time. 0 = automatic (55% of installed RAM). On a machine dedicated to this run a larger value lets more files run at once; 4 GB of free RAM is always kept spare whatever is entered. workers: total CPU threads to use. 0 = automatic (80% of logical CPUs). The same options on the command line (--ram-limit-gb, --workers) take priority over this file.",
+  "ram_limit_gb": 0,
+  "workers": 0
+}

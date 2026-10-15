@@ -1,0 +1,29 @@
+# Data
+data/
+
+# Compiled artifacts (built by build_core.sh)
+*.so
+*.dll
+*.dylib
+*.o
+*.obj
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs
+*.log
