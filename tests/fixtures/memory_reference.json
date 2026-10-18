@@ -1,98 +1,98 @@
 {
  "cases": {
   "fpl_clip_buffered": {
-   "held": 50249361,
+   "held": 50248642,
    "n": 1031965,
    "n_ground": 92509,
-   "released": 2528,
+   "released": 1905,
    "result_ground": 7397030,
    "result_heights": 8256336,
    "result_low": 1032061,
    "result_model": 2064122,
-   "run_peak": 63645298,
+   "run_peak": 63645347,
    "stage": {
     "_build_state": 16513384,
     "_choose_seeds": 943882,
-    "_filter_low_points": 30617795,
+    "_filter_low_points": 30617939,
     "_grow": 5312,
     "_prune_spikes": 3264,
-    "init": 49539192
+    "init": 49539240
    }
   },
   "fpl_steep_clip": {
-   "held": 26702928,
+   "held": 26703253,
    "n": 404354,
    "n_ground": 131230,
-   "released": 2823,
+   "released": 3148,
    "result_ground": 8598445,
    "result_heights": 3235448,
    "result_low": 404450,
    "result_model": 808900,
-   "run_peak": 28850110,
+   "run_peak": 28850435,
    "stage": {
     "_build_state": 6471608,
     "_choose_seeds": 520426,
-    "_filter_low_points": 13408895,
-    "_grow": 7891177,
+    "_filter_low_points": 13409236,
+    "_grow": 7891739,
     "_prune_spikes": 2120,
-    "init": 19413848
+    "init": 19413752
    }
   },
   "fpl_steep_clip+growth": {
-   "held": 29229050,
+   "held": 29227974,
    "n": 404354,
    "n_ground": 131230,
-   "released": 1969,
+   "released": 1173,
    "result_ground": 8598397,
    "result_heights": 3235448,
    "result_low": 404450,
    "result_model": 808900,
-   "run_peak": 31376279,
+   "run_peak": 31375204,
    "stage": {
     "_build_state": 6471608,
     "_choose_seeds": 520426,
-    "_filter_low_points": 13408505,
-    "_grow": 12883694,
+    "_filter_low_points": 13408844,
+    "_grow": 12884970,
     "_prune_spikes": 2120,
     "init": 19413608
    }
   },
   "rocktops_clip_buffered": {
-   "held": 46354113,
+   "held": 46353626,
    "n": 851653,
    "n_ground": 72956,
-   "released": 2527,
+   "released": 2040,
    "result_ground": 5586370,
-   "result_heights": 6813840,
+   "result_heights": 6813792,
    "result_low": 851749,
    "result_model": 1703498,
-   "run_peak": 53617461,
+   "run_peak": 53617271,
    "stage": {
     "_build_state": 13628680,
-    "_choose_seeds": 1382463,
-    "_filter_low_points": 26360173,
-    "_grow": 5721702,
+    "_choose_seeds": 1382415,
+    "_filter_low_points": 26360124,
+    "_grow": 5721750,
     "_prune_spikes": 6888,
     "init": 40884056
    }
   },
   "water_clip_buffered": {
-   "held": 46967748,
+   "held": 46967933,
    "n": 862871,
    "n_ground": 88184,
-   "released": 1468,
+   "released": 1701,
    "result_ground": 6269326,
-   "result_heights": 6903536,
+   "result_heights": 6903584,
    "result_low": 862967,
    "result_model": 1725934,
-   "run_peak": 54027985,
+   "run_peak": 54027986,
    "stage": {
     "_build_state": 13808000,
     "_choose_seeds": 763438,
-    "_filter_low_points": 26411613,
-    "_grow": 5786948,
+    "_filter_low_points": 26411858,
+    "_grow": 5787041,
     "_prune_spikes": 4472,
-    "init": 41422424
+    "init": 41422520
    }
   }
  },
@@ -103,9 +103,9 @@
    "rocktops_clip_buffered.npz": "269066b7eb85980d186b77c5a1f19f7a06ba9d86df270514b39f05f1ce9e562e",
    "water_clip_buffered.npz": "de1a10d4079fbfd86574e426b5ec457dd5270446eeefeb894b8782d567dcffed"
   },
-  "commit": "5b4fb33 + uncommitted changes",
+  "commit": "e493f7e",
   "defaults_sha256": "bfa7f3e9cd82b80b69bde09b1ac21041a77827643713581496b1f2a804c1af7f",
-  "note": "after ptdcore.Core: same numbers as commit 5b4fb33 except the picks buffer (4 B/point) is now allocated with the core state, not in grow",
+  "note": "after ptdcore.Core; picks buffer allocated with the core state",
   "numpy": "2.5.4",
   "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
   "python": "3.13.7",
