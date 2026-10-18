@@ -1,11 +1,18 @@
 """Fast ground engine: Python side of the compiled core (ptdcore.c).
 
-    ground, height, low = classify_ground(x, y, z)
+    run = GroundRun(x, y, z, settings).run()
 
-x, y, z are the candidate points of one block, in metres. Returns, per point:
-    ground  True for points on the ground surface
-    height  height above the finished ground surface (metres, 0 for ground points)
-    low     True for isolated low points that were kept out of the surface
+x, y, z are the candidate points of one block, in metres; settings overrides DEFAULTS below. Then, per point:
+    run.ground()   True for points on the ground surface
+    run.heights()  height above the finished ground surface (metres; 0 for the points the surface is built from,
+                   within `surface_band` for the other ground points)
+    run.low()      True for isolated low points that were kept out of the surface
+    run.model()    True for the points the surface is triangulated from
+and per block: run.followed, run.turned, run.spikes_removed (points added or taken out by the later steps),
+run.seed_square (side of the starting squares used, in metres) and run.check() (0 when the triangulation is valid).
+
+GroundRun is the API. `isolated_low_points` and `choose_seeds` are its first two stages, kept as plain functions of
+arrays (no run state, no compiled core) so that each can be used and tested on its own.
 """
 import ctypes
 import os
@@ -159,23 +166,82 @@ def _ptr(a, t):
     return a.ctypes.data_as(t)
 
 
-def isolated_low_points(xi, yi, z, unit, cell, neighbours, radius, drop, passes):
+def isolated_low_points(xi, yi, z, unit, cell, neighbours, radius, drop, passes, min_neighbours=3):
     """Isolated low points - the job TerraScan's separate 'Low points' routine does before Ground.
 
-    Looks only at the lowest point of each `cell`-sized square. Such a point is an error when it lies more than
-    `drop` below EVERY neighbouring lowest point within `radius`: real ground always has a neighbour near its own
-    level (the downhill one on a slope, the next one along a ditch). Repeated, so a small group of low errors is
-    peeled away one layer at a time. Returns (low flags, index of the lowest clean point of each square)."""
+    Works in two steps:
+
+    1. Candidates: the data is gridded into `cell`-sized squares and the lowest point of each square is taken.
+       This step looks at one square at a time, with no reference to neighbouring squares.
+    2. Test: each candidate is compared with the other candidates (the lowest points of the surrounding
+       squares) within `radius`. It is a 'low point' when it lies more than `drop` below EVERY one of them: real
+       ground always has a neighbour near its own level (the downhill one on a slope, the next one along a
+       ditch). Only the per-square lowest points take part; other points in the neighbouring squares are not
+       compared.
+
+    Repeated, so a small group of low errors is peeled away one layer at a time: a flagged point is set aside
+    and the next-lowest point of its square becomes that square's candidate in the following pass.
+
+    Parameters
+    ----------
+    xi, yi : integer arrays, one value per point
+        Horizontal coordinates as whole multiples of `unit`, measured from the block's lower-left corner
+        (non-negative).
+    z : float array, one value per point
+        Elevations in metres. Not scaled by `unit`: they are compared directly with `drop`.
+    unit : float
+        Metres per step of `xi` / `yi` (the `unit` setting). It only quantises the horizontal coordinates;
+        it is not the project's coordinate unit.
+    cell : float
+        Side of the squares, in metres, whose lowest point is examined (the `low_cell` setting).
+    neighbours : int
+        How many nearest lowest points are compared with each one (the `low_neighbours` setting), at most.
+    radius : float
+        How far away, in metres, a neighbour may be (the `low_radius` setting).
+    drop : float
+        How far, in metres, a point must lie below every one of its neighbours to be flagged
+        (the `low_drop` setting).
+    passes : int
+        Maximum number of peeling rounds (the `low_passes` setting). Stops early when a round flags nothing.
+    min_neighbours : int, default 3
+        The fewest neighbours that must lie inside `radius` for a point to be tested. A point with fewer is never
+        flagged: with so few neighbours there is too little to compare its height against. Must be between 0 and
+        `neighbours` (no point can have more than `neighbours` neighbours, so a larger value would flag nothing).
+        Not a user setting; `isolated_low_points` is called without it, so the default applies.
+
+    Returns
+    -------
+    low : bool array, one value per point
+        True for the points flagged as isolated low points.
+    cell_min : int array, one value per occupied square
+        Index of the lowest point of each square that was not flagged. A square whose points were all flagged
+        is left out.
+    cell_key : int array, same length as `cell_min`
+        The square of each entry of `cell_min`, as row * width + column (row = y // step, column = x // step).
+    width : int
+        Number of square columns, needed to split `cell_key` back into row and column.
+    step : int
+        Side of a square in units of `xi` / `yi`.
+
+    Raises
+    ------
+    ValueError
+        If `min_neighbours` is negative or greater than `neighbours`."""
+    
+    if not 0 <= min_neighbours <= neighbours:
+        raise ValueError(
+            f"min_neighbours ({min_neighbours}) must be between 0 and neighbours ({neighbours}): "
+            f"a point cannot have more than {neighbours} neighbours, so no point could ever be flagged")
     from scipy.spatial import cKDTree
     n = z.size
     step = max(1, int(round(cell / unit)))
     width = int(xi.max()) // step + 1
     key = (yi // step).astype(np.int64) * width + (xi // step)
-    order = np.lexsort((z, key))            # by square, lowest first
+    order = np.lexsort((z, key))            # by points by square, with each square ordered by lowest z
     skey = key[order]
-    starts = np.flatnonzero(np.concatenate(([True], skey[1:] != skey[:-1])))
-    ends = np.concatenate((starts[1:], [n]))
-    cursor = starts.copy()                   # position of the lowest not-yet-flagged point of each square
+    starts = np.flatnonzero(np.concatenate(([True], skey[1:] != skey[:-1]))) # index of start of each square in the ordered array
+    ends = np.concatenate((starts[1:], [n]))                  # index of end of each square in the ordered array
+    cursor = starts.copy()                   # position of the lowest not-yet-flagged point of each square in the ordered array
     low = np.zeros(n, bool)
     for _ in range(passes):
         live = cursor < ends
@@ -186,7 +252,7 @@ def isolated_low_points(xi, yi, z, unit, cell, neighbours, radius, drop, passes)
         dist, nb = cKDTree(xy).query(xy, k=neighbours + 1, distance_upper_bound=radius)
         found = np.isfinite(dist[:, 1:])
         nz = np.where(found, z[mins][np.minimum(nb[:, 1:], mins.size - 1)], np.inf)
-        flagged = (found.sum(axis=1) >= 3) & (z[mins] < nz.min(axis=1) - drop)
+        flagged = (found.sum(axis=1) >= min_neighbours) & (z[mins] < nz.min(axis=1) - drop)
         if not flagged.any():
             break
         low[mins[flagged]] = True
@@ -195,8 +261,107 @@ def isolated_low_points(xi, yi, z, unit, cell, neighbours, radius, drop, passes)
     return low, order[cursor[live]], skey[cursor[live]], width, step
 
 
+def choose_seeds(cell_min, cell_key, width, z, max_building_size, cell, slope_half, slope_quarter, square_min):
+    """The starting points of the surface: the lowest clean point of every building-size square.
+
+    From the lowest clean point of each `cell`-sized square (see `isolated_low_points`), takes the lowest of every
+    `max_building_size`-sized square. The surface starts as a triangulation of these points, so each must lie on
+    real ground: a square as big as the biggest building has a point outside it.
+
+    Two adjustments:
+
+    - A block smaller than about two building squares (a sliver of a tile at the edge of the project) would get
+      fewer than the three points a surface needs: the square is halved until there are enough.
+    - On steep ground the square is halved or quartered: the lowest point of a 60 m square on a hillside sits at its
+      downhill edge and says nothing about the rest of it, and there are no 60 m flat roofs on a hillside. The slope
+      is judged from the lowest points of neighbouring starting squares.
+
+    Parameters
+    ----------
+    cell_min : int array, one value per occupied square
+        Index into `z` of the lowest clean point of each `cell` square.
+    cell_key : int array, same length as `cell_min`
+        The square of each entry, as row * width + column.
+    width : int
+        Number of square columns, to split `cell_key` back into row and column.
+    z : float array, one value per point
+        Elevations in metres.
+    max_building_size : float
+        Side of a starting square, in metres (the `max_building_size` setting), rounded to whole `cell` squares.
+    cell : float
+        Side of the `cell` squares, in metres (the `low_cell` setting).
+    slope_half, slope_quarter : float
+        Degrees (the `seed_slope_half` and `seed_slope_quarter` settings). Where the lowest points of neighbouring
+        starting squares rise at least this steeply, the square is halved, or quartered. A `slope_half` of 0 or
+        less turns this off.
+    square_min : float
+        The starting square is never made smaller than this, in metres, on steep ground (the `seed_square_min`
+        setting).
+
+    Returns
+    -------
+    seeds : int32 array
+        Indices into `z` of the starting points, in ascending order.
+    seed_square : float
+        Side of the starting squares used, in metres, after any halving for a small block.
+    squares_split : int
+        How many starting squares were found steep enough to be made smaller.
+
+    Raises
+    ------
+    ValueError
+        If fewer than three starting points can be found."""
+    ratio = max(1, int(round(max_building_size / cell)))
+    if cell_min.size < 3:
+        raise ValueError("fewer than three starting points")
+    cx = cell_key % width; cy = cell_key // width
+    zc = z[cell_min]
+    while True:
+        bx = cx // ratio; by = cy // ratio
+        o = np.lexsort((zc, bx, by))
+        first = np.concatenate(([True], (bx[o][1:] != bx[o][:-1]) | (by[o][1:] != by[o][:-1])))
+        seeds = np.sort(cell_min[o[first]])
+        if seeds.size >= 3 or ratio == 1:
+            break
+        ratio = max(1, ratio // 2)
+    t_half = np.tan(np.radians(slope_half)); t_quarter = np.tan(np.radians(slope_quarter))
+    squares_split = 0
+    if ratio >= 4 and seeds.size >= 3 and t_half > 0.0:
+        nbx = int(bx.max()) + 1; nby = int(by.max()) + 1
+        coarse = np.full((nby + 2, nbx + 2), np.nan)
+        coarse[by[o[first]] + 1, bx[o[first]] + 1] = zc[o[first]]
+        centre = coarse[1:-1, 1:-1]
+        rise = np.zeros_like(centre)
+        for dy in (0, 1, 2):
+            for dx in (0, 1, 2):
+                d = np.abs(coarse[dy:dy + nby, dx:dx + nbx] - centre) / (np.hypot(dx - 1, dy - 1) or 1.0)
+                rise = np.fmax(rise, np.nan_to_num(d))
+        slope = rise / (ratio * float(cell))                     # per coarse square
+        level = (slope >= t_half).astype(np.int64) + (slope >= t_quarter)
+        lv = level[by, bx]                                       # per small-square minimum
+        if lv.any():
+            smallest = max(1, int(round(square_min / cell)))
+            sub = np.minimum(ratio, np.maximum(smallest, ratio >> lv))   # side of the starting square, in small squares
+            sx_ = (cx % ratio) // sub; sy_ = (cy % ratio) // sub
+            key2 = ((by * nbx + bx) * 4096 + sy_ * 64 + sx_)
+            o2 = np.lexsort((zc, key2))
+            first2 = np.concatenate(([True], key2[o2][1:] != key2[o2][:-1]))
+            seeds = np.sort(cell_min[o2[first2]])
+            squares_split = int((level > 0).sum())
+    if seeds.size < 3:
+        raise ValueError("fewer than three starting points")
+    return np.ascontiguousarray(seeds, dtype=np.int32), ratio * float(cell), squares_split
+
+
 class GroundRun:
-    """One run of the core on one block of candidate points."""
+    """One run of the core on one block of candidate points: GroundRun(x, y, z, settings).run().
+
+    The constructor only prepares the coordinates. run() does the work in stages: the low-point filter, the starting
+    points, the arrays and state of the compiled core, growing the surface, giving back low points the finished
+    surface reaches, and taking out spikes. Calling run() again returns the finished run.
+
+    `initial_capacity`, if set before run(), replaces the first size of the triangle arrays (the tests use it to
+    force them to be enlarged many times)."""
 
     def __init__(self, x, y, z, settings=None, lib=None):
         p = dict(DEFAULTS)
@@ -218,69 +383,86 @@ class GroundRun:
         row = max(1, int(round(2.0 / unit)))
         order = np.argsort((yi // row) * (xmax + 1) + xi, kind="stable")
         self.order = order
-        xi = xi[order]; yi = yi[order]
-        zz = np.asarray(z, dtype=np.float64)[order]
+        self._xi = xi[order]; self._yi = yi[order]
+        self._zz = np.asarray(z, dtype=np.float64)[order]
+        self._extent = (xmax, ymax, margin)         # of the block in whole units, and the margin of the corner points
 
-        low, cell_min, cell_key, width, step = isolated_low_points(
-            xi, yi, zz, unit, p["low_cell"], int(p["low_neighbours"]), p["low_radius"], p["low_drop"], int(p["low_passes"]))
+        self.state = None                           # made by run()
+        self.initial_capacity = None
+        self.follow_prm = np.array([
+            p["follow_chord_edge"], p["follow_min"], p["follow_max"], np.tan(np.radians(p["follow_up"])),
+            np.tan(np.radians(p["follow_down"])), np.tan(np.radians(p["follow_slope"])),
+            p["follow_guide_radius"], p["follow_guide_rms"], np.tan(np.radians(p["follow_guide_tilt"])),
+            p["follow_check_tol"]], dtype=np.float64)
+        self.turn_prm = np.array([
+            p["follow_chord_edge"], p["turn_min"], p["turn_max"], p["turn_tol"], np.tan(np.radians(p["turn_slope"])),
+            p["turn_bins"], p["turn_reach"], p["turn_check_radius"], p["turn_check_tol"]], dtype=np.float64)
+        self.turns = 0
+        self.turned = 0
+        self.spike_prm = np.array([
+            np.tan(np.radians(p["spike_up_angle"])), p["spike_up_height"],
+            np.tan(np.radians(p["spike_down_angle"])), p["spike_down_height"], p["spike_neighbours"]], dtype=np.float64)
+        self.spikes_removed = 0
+        self.rounds = 0
+        self.followed = 0
+        self.restored = 0
+        self.picks = None
+        self.mcap = 0
+
+    def run(self):
+        if self.state is not None:          # already run
+            return self
+        cell_min, cell_key, width = self._filter_low_points()
+        self._choose_seeds(cell_min, cell_key, width)
+        self._build_state()
+        self._grow()
+        if self.low_sorted.any():
+            # A point set aside as an isolated low point that the finished surface nevertheless comes down to
+            # (within low_drop) was not isolated after all: give it back and let the surface settle again.
+            back = self.low_sorted & (self._heights_sorted() >= -float(self.p["low_drop"]))
+            if back.any():
+                self.locked[back] = 0
+                self.low_sorted[back] = False
+                self.restored = int(back.sum())
+                self.vtouch[:] = 1      # unlocking changes what a triangle may take: look at all of them again
+                self.lib.ptd_requeue(ctypes.byref(self.state))
+                self._grow()
+        self._prune_spikes()
+        return self
+
+    def _filter_low_points(self):
+        """Find the isolated low points; returns what `choose_seeds` needs."""
+        p = self.p
+        low, cell_min, cell_key, width, _ = isolated_low_points(
+            self._xi, self._yi, self._zz, float(p["unit"]), p["low_cell"], int(p["low_neighbours"]), p["low_radius"],
+            p["low_drop"], int(p["low_passes"]))
         self.low_sorted = low
-        # seeds: the lowest clean point of every building-size square (taken from the small-square minima)
-        # A block smaller than about two building squares (a sliver of a tile at the edge of the project) would get
-        # fewer than the three points a surface needs: the square is halved until there are enough.
-        ratio = max(1, int(round(p["max_building_size"] / p["low_cell"])))
-        if cell_min.size < 3:
-            raise ValueError("fewer than three starting points")
-        cx = cell_key % width; cy = cell_key // width
-        zc = zz[cell_min]
-        while True:
-            bx = cx // ratio; by = cy // ratio
-            o = np.lexsort((zc, bx, by))
-            first = np.concatenate(([True], (bx[o][1:] != bx[o][:-1]) | (by[o][1:] != by[o][:-1])))
-            seeds = np.sort(cell_min[o[first]])
-            if seeds.size >= 3 or ratio == 1:
-                break
-            ratio = max(1, ratio // 2)
-        # On steep ground the square is halved or quartered: the lowest point of a 60 m square on a hillside sits at
-        # its downhill edge and says nothing about the rest of it, and there are no 60 m flat roofs on a hillside.
-        t_half = np.tan(np.radians(p["seed_slope_half"])); t_quarter = np.tan(np.radians(p["seed_slope_quarter"]))
-        self.seed_squares_split = 0
-        if ratio >= 4 and seeds.size >= 3 and t_half > 0.0:
-            nbx = int(bx.max()) + 1; nby = int(by.max()) + 1
-            coarse = np.full((nby + 2, nbx + 2), np.nan)
-            coarse[by[o[first]] + 1, bx[o[first]] + 1] = zc[o[first]]
-            centre = coarse[1:-1, 1:-1]
-            rise = np.zeros_like(centre)
-            for dy in (0, 1, 2):
-                for dx in (0, 1, 2):
-                    d = np.abs(coarse[dy:dy + nby, dx:dx + nbx] - centre) / (np.hypot(dx - 1, dy - 1) or 1.0)
-                    rise = np.fmax(rise, np.nan_to_num(d))
-            slope = rise / (ratio * float(p["low_cell"]))            # per coarse square
-            level = (slope >= t_half).astype(np.int64) + (slope >= t_quarter)
-            lv = level[by, bx]                                       # per small-square minimum
-            if lv.any():
-                smallest = max(1, int(round(p["seed_square_min"] / p["low_cell"])))
-                sub = np.minimum(ratio, np.maximum(smallest, ratio >> lv))   # side of the starting square, in small squares
-                sx_ = (cx % ratio) // sub; sy_ = (cy % ratio) // sub
-                key2 = ((by * nbx + bx) * 4096 + sy_ * 64 + sx_)
-                o2 = np.lexsort((zc, key2))
-                first2 = np.concatenate(([True], key2[o2][1:] != key2[o2][:-1]))
-                seeds = np.sort(cell_min[o2[first2]])
-                self.seed_squares_split = int((level > 0).sum())
-        if seeds.size < 3:
-            raise ValueError("fewer than three starting points")
-        self.seed_square = ratio * float(p["low_cell"])
-        self.seeds = np.ascontiguousarray(seeds, dtype=np.int32)
+        return cell_min, cell_key, width
 
+    def _choose_seeds(self, cell_min, cell_key, width):
+        p = self.p
+        self.seeds, self.seed_square, self.seed_squares_split = choose_seeds(
+            cell_min, cell_key, width, self._zz, p["max_building_size"], p["low_cell"], p["seed_slope_half"],
+            p["seed_slope_quarter"], p["seed_square_min"])
+
+    def _build_state(self):
+        """The arrays and the state handed to the compiled core, with the first allocation of triangle memory."""
+        p = self.p
+        n = self.n
+        unit = float(p["unit"])
+        xi, yi, zz = self._xi, self._yi, self._zz
+        xmax, ymax, margin = self._extent
+        seeds = self.seeds
         corners = np.array([[-margin, -margin], [xmax + margin, -margin], [xmax + margin, ymax + margin], [-margin, ymax + margin]], dtype=np.int64)
         sx, sy, sz = xi[seeds], yi[seeds], zz[seeds]
         cz = np.array([sz[np.argmin((sx - cx) ** 2 + (sy - cy) ** 2)] for cx, cy in corners])
         self.X = np.ascontiguousarray(np.concatenate((xi, corners[:, 0])), dtype=np.int32)
         self.Y = np.ascontiguousarray(np.concatenate((yi, corners[:, 1])), dtype=np.int32)
         self.Z = np.ascontiguousarray(np.concatenate((zz, cz)), dtype=np.float64)
-        del xi, yi, zz
+        del xi, yi, zz, self._xi, self._yi, self._zz
         self.next = np.empty(n, np.int32)
         self.ptri = np.empty(n, np.int32)
-        self.locked = np.ascontiguousarray(low, dtype=np.uint8)
+        self.locked = np.ascontiguousarray(self.low_sorted, dtype=np.uint8)
 
         s = self.state = _State()
         s.n = n
@@ -304,26 +486,7 @@ class GroundRun:
         s.reduce_edge = float(p["reduce_angle_edge"]); s.stop_edge = float(p["stop_edge"])
         s.reduce_edge_steep = float(p["reduce_angle_edge_steep"])
         s.initialised = 0; s.m = 0; s.mode = 0
-        self.follow_prm = np.array([
-            p["follow_chord_edge"], p["follow_min"], p["follow_max"], np.tan(np.radians(p["follow_up"])),
-            np.tan(np.radians(p["follow_down"])), np.tan(np.radians(p["follow_slope"])),
-            p["follow_guide_radius"], p["follow_guide_rms"], np.tan(np.radians(p["follow_guide_tilt"])),
-            p["follow_check_tol"]], dtype=np.float64)
-        self.turn_prm = np.array([
-            p["follow_chord_edge"], p["turn_min"], p["turn_max"], p["turn_tol"], np.tan(np.radians(p["turn_slope"])),
-            p["turn_bins"], p["turn_reach"], p["turn_check_radius"], p["turn_check_tol"]], dtype=np.float64)
-        self.turns = 0
-        self.turned = 0
-        self.spike_prm = np.array([
-            np.tan(np.radians(p["spike_up_angle"])), p["spike_up_height"],
-            np.tan(np.radians(p["spike_down_angle"])), p["spike_down_height"], p["spike_neighbours"]], dtype=np.float64)
-        self.spikes_removed = 0
-        self.rounds = 0
-        self.followed = 0
-        self.restored = 0
-        self.picks = None
-        self.mcap = 0
-        self._allocate(max(1024, min(2 * n + 8, 4 * self.seeds.size + n // 8 + 1024)))
+        self._allocate(self.initial_capacity or max(1024, min(2 * n + 8, 4 * self.seeds.size + n // 8 + 1024)))
 
     def _allocate(self, mcap):
         s = self.state
@@ -387,22 +550,6 @@ class GroundRun:
                 break
             self._follow()
 
-    def run(self):
-        self._grow()
-        if self.low_sorted.any():
-            # A point set aside as an isolated low point that the finished surface nevertheless comes down to
-            # (within low_drop) was not isolated after all: give it back and let the surface settle again.
-            back = self.low_sorted & (self._heights_sorted() >= -float(self.p["low_drop"]))
-            if back.any():
-                self.locked[back] = 0
-                self.low_sorted[back] = False
-                self.restored = int(back.sum())
-                self.vtouch[:] = 1      # unlocking changes what a triangle may take: look at all of them again
-                self.lib.ptd_requeue(ctypes.byref(self.state))
-                self._grow()
-        self._prune_spikes()
-        return self
-
     def _prune_spikes(self):
         """Take spikes back out of the finished surface, let the plain test refill, and look again."""
         for _ in range(int(self.p["spike_rounds"])):
@@ -463,8 +610,3 @@ class GroundRun:
 
     def check(self):
         return int(self.lib.ptd_check(ctypes.byref(self.state)))
-
-
-def classify_ground(x, y, z, settings=None, lib=None):
-    run = GroundRun(x, y, z, settings, lib).run()
-    return run.ground(), run.heights(), run.low()

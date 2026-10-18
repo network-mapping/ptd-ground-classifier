@@ -11,7 +11,7 @@ def ok(name, cond, note=""):
 def go(x, y, z, settings=None, library=lib, small=False):
     r = fg.GroundRun(x, y, z, settings, library)
     if small:
-        r.mcap = 0; r._allocate(1024)      # force the triangle arrays to be enlarged many times mid-run
+        r.initial_capacity = 1024      # force the triangle arrays to be enlarged many times mid-run
     return r.run()
 rng = np.random.default_rng(5)
 # 1. random terrain with objects: triangulation valid, objects rejected

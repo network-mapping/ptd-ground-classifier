@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 PY     := $(VENV)/bin/python
 
-.PHONY: venv build test validate clean
+.PHONY: venv build test regression validate clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -14,6 +14,9 @@ build:
 
 test: build
 	$(PY) tests/test_fast_engine.py tests/validation/clips
+
+regression: build
+	$(PY) tests/test_regression.py
 
 validate: build
 	$(PY) tests/validation/validate_suite.py
