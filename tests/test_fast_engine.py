@@ -1,7 +1,7 @@
 """Checks of the compiled core. usage: python tests/test_fast_engine.py [clips_dir]"""
 import sys, os, numpy as np
-from ground_classifier import fast_ground as fg
-lib = fg.load_library()
+from ground_classifier import fast_ground as fg, ptdcore
+lib = ptdcore.load()
 lib2 = None
 fails = 0
 def ok(name, cond, note=""):

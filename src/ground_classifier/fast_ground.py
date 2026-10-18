@@ -12,18 +12,13 @@ and per block: run.followed, run.turned, run.spikes_removed (points added or tak
 run.seed_square (side of the starting squares used, in metres) and run.check() (0 when the triangulation is valid).
 
 GroundRun is the API. `isolated_low_points` and `choose_seeds` are its first two stages, kept as plain functions of
-arrays (no run state, no compiled core) so that each can be used and tested on its own.
+arrays (no run state, no compiled core) so that each can be used and tested on its own. Everything that touches the
+compiled core goes through `ptdcore` (loading the library, the arrays it works on, their memory); this module decides
+what to ask of it.
 """
-import ctypes
-import os
-import sys
-
 import numpy as np
 
-_i32p = ctypes.POINTER(ctypes.c_int32)
-_f64p = ctypes.POINTER(ctypes.c_double)
-_f32p = ctypes.POINTER(ctypes.c_float)
-_u8p = ctypes.POINTER(ctypes.c_uint8)
+from . import ptdcore
 
 # The settings carry TerraScan's names where TerraScan has the same setting.
 DEFAULTS = {
@@ -80,90 +75,44 @@ DEFAULTS = {
 }
 
 
-class _State(ctypes.Structure):
-    _fields_ = [
-        ("n", ctypes.c_int64), ("X", _i32p), ("Y", _i32p), ("Z", _f64p), ("next", _i32p), ("ptri", _i32p),
-        ("tv", _i32p), ("tn", _i32p), ("thead", _i32p), ("ttail", _i32p), ("tinq", _u8p), ("queue", _i32p), ("stack", _i32p),
-        ("mcap", ctypes.c_int64), ("m", ctypes.c_int64), ("qhead", ctypes.c_int64), ("qcount", ctypes.c_int64),
-        ("seeds", _i32p), ("nseeds", ctypes.c_int64), ("seed_pos", ctypes.c_int64),
-        ("unit", ctypes.c_double), ("sin2_limit", ctypes.c_double), ("up_dist", ctypes.c_double), ("down_dist", ctypes.c_double),
-        ("tan2_terrain", ctypes.c_double), ("reduce_edge", ctypes.c_double), ("stop_edge", ctypes.c_double), ("below_free", ctypes.c_double),
-        ("n_ground", ctypes.c_int64), ("n_tests", ctypes.c_int64), ("n_flips", ctypes.c_int64), ("initialised", ctypes.c_int32),
-        ("locked", _u8p), ("mode", ctypes.c_int32), ("vtouch", _u8p), ("vtri", _i32p),
-        ("sin_flat", ctypes.c_double), ("sin_steep", ctypes.c_double), ("tan_flat", ctypes.c_double), ("tan_steep", ctypes.c_double), ("reduce_edge_steep", ctypes.c_double),
-    ]
+def _acceptance_params(p):
+    """The acceptance test of the plain progressive TIN, from the settings (degrees become sines and tangents)."""
+    return ptdcore.AcceptanceParams(
+        unit=float(p["unit"]),
+        sin_flat=float(np.sin(np.radians(p["iteration_angle"]))),
+        sin_steep=float(np.sin(np.radians(max(p["steep_iteration_angle"], p["iteration_angle"])))),
+        tan_flat=float(np.tan(np.radians(p["flat_slope"]))),
+        tan_steep=float(np.tan(np.radians(max(p["steep_slope"], p["flat_slope"] + 1.0)))),
+        up_dist=float(p["iteration_distance"]),
+        down_dist=float(p["below_surface_max"]),
+        below_free=float(p["below_surface_free"]),
+        tan2_terrain=float(np.tan(np.radians(min(p["terrain_angle"], 89.9))) ** 2),
+        reduce_edge=float(p["reduce_angle_edge"]),
+        reduce_edge_steep=float(p["reduce_angle_edge_steep"]),
+        stop_edge=float(p["stop_edge"]))
 
 
-CORE_VERSION = 10   # must equal PTD_VERSION in native/ptdcore.c
-CORE_PATH_ENV_VAR = "GROUND_CLASSIFIER_CORE"
-_LIB = None
+def _follow_params(p):
+    return ptdcore.FollowParams(
+        chord_edge=float(p["follow_chord_edge"]), step_min=float(p["follow_min"]), step_max=float(p["follow_max"]),
+        tan_up=float(np.tan(np.radians(p["follow_up"]))), tan_down=float(np.tan(np.radians(p["follow_down"]))),
+        tan_max_slope=float(np.tan(np.radians(p["follow_slope"]))),
+        guide_radius=float(p["follow_guide_radius"]), guide_rms=float(p["follow_guide_rms"]),
+        tan_guide_tilt=float(np.tan(np.radians(p["follow_guide_tilt"]))), check_tol=float(p["follow_check_tol"]))
 
 
-def library_path():
-    """The compiled core: $GROUND_CLASSIFIER_CORE, else <repo>/build/ (made by native/build.sh)."""
-    override = os.environ.get(CORE_PATH_ENV_VAR)
-    if override:
-        return override
-    if sys.platform == "win32":
-        name = "ptdcore.dll"
-    elif sys.platform == "darwin":
-        name = "libptdcore.dylib"
-    else:
-        name = "libptdcore.so"
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(here, "..", "..", "build", name))
+def _turn_params(p):
+    return ptdcore.TurnParams(
+        chord_edge=float(p["follow_chord_edge"]), rmin=float(p["turn_min"]), rmax=float(p["turn_max"]),
+        tol=float(p["turn_tol"]), tan_max_slope=float(np.tan(np.radians(p["turn_slope"]))), min_bins=int(p["turn_bins"]),
+        min_reach=float(p["turn_reach"]), check_radius=float(p["turn_check_radius"]), check_tol=float(p["turn_check_tol"]))
 
 
-def load_library(path=None):
-    """Load the compiled core. Raises OSError with a plain message if it cannot be used on this machine."""
-    global _LIB
-    if _LIB is not None and path is None:
-        return _LIB
-    path = path or library_path()
-    if not os.path.exists(path):
-        raise OSError(f"compiled core not found: {path} (run `make build`)")
-    lib = ctypes.CDLL(path)
-    try:
-        lib.ptd_version.argtypes = []; lib.ptd_version.restype = ctypes.c_int64
-        version = int(lib.ptd_version())
-    except AttributeError:
-        version = -1
-    if version != CORE_VERSION:
-        raise OSError(f"compiled core is version {version}, this script needs {CORE_VERSION} (run `make build`)")
-    state = ctypes.POINTER(_State)
-    lib.ptd_run.argtypes = [state, ctypes.c_int64]; lib.ptd_run.restype = ctypes.c_int
-    lib.ptd_heights.argtypes = [state, _f32p]; lib.ptd_heights.restype = None
-    lib.ptd_frontier.argtypes = [state, _f64p, _i32p]; lib.ptd_frontier.restype = ctypes.c_int64
-    lib.ptd_hinge.argtypes = [state, _f64p, _i32p]; lib.ptd_hinge.restype = ctypes.c_int64
-    lib.ptd_insert.argtypes = [state, _i32p, ctypes.c_int64]; lib.ptd_insert.restype = ctypes.c_int64
-    lib.ptd_requeue.argtypes = [state]; lib.ptd_requeue.restype = None
-    lib.ptd_spikes.argtypes = [state, _f64p, _i32p]; lib.ptd_spikes.restype = ctypes.c_int64
-    lib.ptd_remove.argtypes = [state, _i32p, ctypes.c_int64]; lib.ptd_remove.restype = ctypes.c_int64
-    lib.ptd_members.argtypes = [state, ctypes.c_double, ctypes.c_double, ctypes.c_double, _u8p]; lib.ptd_members.restype = ctypes.c_int64
-    lib.ptd_check.argtypes = [state]; lib.ptd_check.restype = ctypes.c_int64
-    lib.ptd_state_size.argtypes = []; lib.ptd_state_size.restype = ctypes.c_int64
-    if lib.ptd_state_size() != ctypes.sizeof(_State):
-        raise OSError("compiled core does not match this script (run `make build`)")
-    _self_test(lib)
-    if path == library_path():
-        _LIB = lib
-    return lib
-
-
-def _self_test(lib):
-    """A two-millisecond run on a known surface: proves the library really works in this process."""
-    rng = np.random.default_rng(1)
-    x = rng.uniform(0.0, 80.0, 4000); y = rng.uniform(0.0, 80.0, 4000)
-    z = 0.05 * x + 0.02 * y + rng.normal(0.0, 0.01, 4000)
-    z[:400] += rng.uniform(2.0, 9.0, 400)          # things standing on the surface
-    run = GroundRun(x, y, z, {"max_building_size": 20.0}, lib).run()
-    ground = run.ground()
-    if run.check() != 0 or ground[:400].any() or ground[400:].sum() < 2000:
-        raise OSError("compiled core failed its self-test on this machine")
-
-
-def _ptr(a, t):
-    return a.ctypes.data_as(t)
+def _spike_params(p):
+    return ptdcore.SpikeParams(
+        tan_up=float(np.tan(np.radians(p["spike_up_angle"]))), h_up=float(p["spike_up_height"]),
+        tan_down=float(np.tan(np.radians(p["spike_down_angle"]))), h_down=float(p["spike_down_height"]),
+        min_neighbours=int(p["spike_neighbours"]))
 
 
 def isolated_low_points(xi, yi, z, unit, cell, neighbours, radius, drop, passes, min_neighbours=3):
@@ -368,7 +317,7 @@ class GroundRun:
         if settings:
             p.update(settings)
         self.p = p
-        self.lib = lib or load_library()
+        self._lib = lib or ptdcore.load()
         unit = float(p["unit"])
         n = int(x.size)
         self.n = n
@@ -387,30 +336,20 @@ class GroundRun:
         self._zz = np.asarray(z, dtype=np.float64)[order]
         self._extent = (xmax, ymax, margin)         # of the block in whole units, and the margin of the corner points
 
-        self.state = None                           # made by run()
+        self._core = None                           # made by run()
         self.initial_capacity = None
-        self.follow_prm = np.array([
-            p["follow_chord_edge"], p["follow_min"], p["follow_max"], np.tan(np.radians(p["follow_up"])),
-            np.tan(np.radians(p["follow_down"])), np.tan(np.radians(p["follow_slope"])),
-            p["follow_guide_radius"], p["follow_guide_rms"], np.tan(np.radians(p["follow_guide_tilt"])),
-            p["follow_check_tol"]], dtype=np.float64)
-        self.turn_prm = np.array([
-            p["follow_chord_edge"], p["turn_min"], p["turn_max"], p["turn_tol"], np.tan(np.radians(p["turn_slope"])),
-            p["turn_bins"], p["turn_reach"], p["turn_check_radius"], p["turn_check_tol"]], dtype=np.float64)
+        self._follow_params = _follow_params(p)
+        self._turn_params = _turn_params(p)
+        self._spike_params = _spike_params(p)
         self.turns = 0
         self.turned = 0
-        self.spike_prm = np.array([
-            np.tan(np.radians(p["spike_up_angle"])), p["spike_up_height"],
-            np.tan(np.radians(p["spike_down_angle"])), p["spike_down_height"], p["spike_neighbours"]], dtype=np.float64)
         self.spikes_removed = 0
         self.rounds = 0
         self.followed = 0
         self.restored = 0
-        self.picks = None
-        self.mcap = 0
 
     def run(self):
-        if self.state is not None:          # already run
+        if self._core is not None:          # already run
             return self
         cell_min, cell_key, width = self._filter_low_points()
         self._choose_seeds(cell_min, cell_key, width)
@@ -419,13 +358,13 @@ class GroundRun:
         if self.low_sorted.any():
             # A point set aside as an isolated low point that the finished surface nevertheless comes down to
             # (within low_drop) was not isolated after all: give it back and let the surface settle again.
-            back = self.low_sorted & (self._heights_sorted() >= -float(self.p["low_drop"]))
+            back = self.low_sorted & (self._core.heights() >= -float(self.p["low_drop"]))
             if back.any():
-                self.locked[back] = 0
+                self._core.unlock(back)
                 self.low_sorted[back] = False
                 self.restored = int(back.sum())
-                self.vtouch[:] = 1      # unlocking changes what a triangle may take: look at all of them again
-                self.lib.ptd_requeue(ctypes.byref(self.state))
+                self._core.mark_all_touched()   # unlocking changes what a triangle may take: look at all of them again
+                self._core.requeue()
                 self._grow()
         self._prune_spikes()
         return self
@@ -446,104 +385,33 @@ class GroundRun:
             p["seed_slope_quarter"], p["seed_square_min"])
 
     def _build_state(self):
-        """The arrays and the state handed to the compiled core, with the first allocation of triangle memory."""
-        p = self.p
-        n = self.n
-        unit = float(p["unit"])
-        xi, yi, zz = self._xi, self._yi, self._zz
+        """Hand the block to the compiled core: the arrays it works on, and the first allocation of triangle memory."""
         xmax, ymax, margin = self._extent
-        seeds = self.seeds
-        corners = np.array([[-margin, -margin], [xmax + margin, -margin], [xmax + margin, ymax + margin], [-margin, ymax + margin]], dtype=np.int64)
-        sx, sy, sz = xi[seeds], yi[seeds], zz[seeds]
-        cz = np.array([sz[np.argmin((sx - cx) ** 2 + (sy - cy) ** 2)] for cx, cy in corners])
-        self.X = np.ascontiguousarray(np.concatenate((xi, corners[:, 0])), dtype=np.int32)
-        self.Y = np.ascontiguousarray(np.concatenate((yi, corners[:, 1])), dtype=np.int32)
-        self.Z = np.ascontiguousarray(np.concatenate((zz, cz)), dtype=np.float64)
-        del xi, yi, zz, self._xi, self._yi, self._zz
-        self.next = np.empty(n, np.int32)
-        self.ptri = np.empty(n, np.int32)
-        self.locked = np.ascontiguousarray(self.low_sorted, dtype=np.uint8)
-
-        s = self.state = _State()
-        s.n = n
-        s.X = _ptr(self.X, _i32p); s.Y = _ptr(self.Y, _i32p); s.Z = _ptr(self.Z, _f64p)
-        s.next = _ptr(self.next, _i32p); s.ptri = _ptr(self.ptri, _i32p)
-        s.seeds = _ptr(self.seeds, _i32p); s.nseeds = self.seeds.size; s.seed_pos = 0
-        s.locked = _ptr(self.locked, _u8p)
-        self.vtouch = np.ones(n + 4, np.uint8)
-        s.vtouch = _ptr(self.vtouch, _u8p)
-        self.vtri = np.full(n + 4, -1, np.int32)
-        s.vtri = _ptr(self.vtri, _i32p)
-        s.unit = unit
-        s.sin2_limit = float(np.sin(np.radians(p["iteration_angle"])) ** 2)
-        s.sin_flat = float(np.sin(np.radians(p["iteration_angle"])))
-        s.sin_steep = float(np.sin(np.radians(max(p["steep_iteration_angle"], p["iteration_angle"]))))
-        s.tan_flat = float(np.tan(np.radians(p["flat_slope"]))); s.tan_steep = float(np.tan(np.radians(max(p["steep_slope"], p["flat_slope"] + 1.0))))
-        s.up_dist = float(p["iteration_distance"])
-        s.down_dist = float(p["below_surface_max"])
-        s.below_free = float(p["below_surface_free"])
-        s.tan2_terrain = float(np.tan(np.radians(min(p["terrain_angle"], 89.9))) ** 2)
-        s.reduce_edge = float(p["reduce_angle_edge"]); s.stop_edge = float(p["stop_edge"])
-        s.reduce_edge_steep = float(p["reduce_angle_edge_steep"])
-        s.initialised = 0; s.m = 0; s.mode = 0
-        self._allocate(self.initial_capacity or max(1024, min(2 * n + 8, 4 * self.seeds.size + n // 8 + 1024)))
-
-    def _allocate(self, mcap):
-        s = self.state
-        old = self.mcap
-
-        def grow(name, per, dtype):
-            a = np.empty(per * mcap + (16 if name == "stack" else 0), dtype)
-            if old and name != "stack":
-                b = getattr(self, name)
-                a[: b.size] = b
-            setattr(self, name, a)
-            return a
-
-        if old:   # straighten the circular queue before it is enlarged
-            live = self.queue[(s.qhead + np.arange(s.qcount)) % old].copy()
-        grow("tv", 3, np.int32); grow("tn", 3, np.int32)
-        grow("thead", 1, np.int32); grow("ttail", 1, np.int32)
-        grow("tinq", 1, np.uint8); grow("queue", 1, np.int32); grow("stack", 2, np.int32)
-        if old:
-            self.queue[: live.size] = live
-            s.qhead = 0
-        self.mcap = mcap
-        s.mcap = mcap
-        s.tv = _ptr(self.tv, _i32p); s.tn = _ptr(self.tn, _i32p)
-        s.thead = _ptr(self.thead, _i32p); s.ttail = _ptr(self.ttail, _i32p)
-        s.tinq = _ptr(self.tinq, _u8p); s.queue = _ptr(self.queue, _i32p); s.stack = _ptr(self.stack, _i32p)
-
-    def _densify(self):
-        while self.lib.ptd_run(ctypes.byref(self.state), 0) != 0:
-            self._allocate(min(2 * self.n + 8, 2 * self.mcap))
-
-    def _insert_picks(self, k):
-        if self.state.m + 2 * k + 8 > self.mcap:
-            self._allocate(min(2 * self.n + 8, max(2 * self.mcap, int(self.state.m) + 2 * k + 8)))
-        return int(self.lib.ptd_insert(ctypes.byref(self.state), _ptr(self.picks, _i32p), k))
+        X, Y, Z = ptdcore.with_corners(self._xi, self._yi, self._zz, self.seeds, xmax, ymax, margin)
+        del self._xi, self._yi, self._zz        # the core holds its own arrays now
+        self._core = ptdcore.Core(X, Y, Z, self.seeds, self.low_sorted, _acceptance_params(self.p), self.initial_capacity, self._lib)
 
     def _follow(self):
         """Plain densification, then following the surface past its edge, until nothing more comes of it."""
-        self._densify()
+        core = self._core
+        core.densify()
         for _ in range(int(self.p["follow_rounds"])):
-            k = int(self.lib.ptd_frontier(ctypes.byref(self.state), _ptr(self.follow_prm, _f64p), _ptr(self.picks, _i32p)))
+            k = core.frontier(self._follow_params)
             if k == 0:
                 break
-            self.followed += self._insert_picks(k)
+            self.followed += core.insert_staged(k)
             self.rounds += 1
-            self._densify()
+            core.densify()
 
     def _grow(self):
-        if self.picks is None:
-            self.picks = np.empty(self.n, np.int32)
+        core = self._core
         self._follow()
         for _ in range(int(self.p["turn_rounds"])):
-            self.vtouch[:] = 1      # following has just cleared the marks; turning looks at every long triangle again
-            k = int(self.lib.ptd_hinge(ctypes.byref(self.state), _ptr(self.turn_prm, _f64p), _ptr(self.picks, _i32p)))
+            core.mark_all_touched()     # following has just cleared the marks; turning looks at every long triangle again
+            k = core.hinge(self._turn_params)
             if k == 0:
                 break
-            done = self._insert_picks(k)
+            done = core.insert_staged(k)
             self.turned += done
             self.turns += 1
             if done == 0:
@@ -552,22 +420,16 @@ class GroundRun:
 
     def _prune_spikes(self):
         """Take spikes back out of the finished surface, let the plain test refill, and look again."""
+        core = self._core
         for _ in range(int(self.p["spike_rounds"])):
-            if self.picks is None:
-                self.picks = np.empty(self.n, np.int32)
-            k = int(self.lib.ptd_spikes(ctypes.byref(self.state), _ptr(self.spike_prm, _f64p), _ptr(self.picks, _i32p)))
+            k = core.spikes(self._spike_params)
             if k == 0:
                 break
-            done = int(self.lib.ptd_remove(ctypes.byref(self.state), _ptr(self.picks, _i32p), k))
+            done = core.remove_staged(k)
             self.spikes_removed += done
             if done == 0:
                 break
-            self._densify()
-
-    def _heights_sorted(self):
-        h = np.empty(self.n, np.float32)
-        self.lib.ptd_heights(ctypes.byref(self.state), _ptr(h, _f32p))
-        return h
+            core.densify()
 
     def _unsort(self, values):
         out = np.empty(self.n, values.dtype)
@@ -576,22 +438,22 @@ class GroundRun:
 
     def model(self):
         """The points the surface is triangulated from."""
-        return self._unsort(self.ptri == -2)
+        return self._unsort(self._core.surface_mask())
 
     def _members_sorted(self):
         """Points in the thin band about the surface, thinned to one per small square: the closest to the surface."""
         band = float(self.p["surface_band"])
-        out = np.zeros(self.n, np.uint8)
         if band <= 0.0:
-            return out.view(bool)
-        k = int(self.lib.ptd_members(ctypes.byref(self.state), band, band, float(self.p["surface_band_edge"]), _ptr(out, _u8p)))
+            return np.zeros(self.n, bool)
+        k, members = self._core.members(band, band, float(self.p["surface_band_edge"]))
         cell = float(self.p["surface_cell"])
         if k == 0 or cell <= 0.0:
-            return out.view(bool)
-        idx = np.flatnonzero(out)
+            return members
+        idx = np.flatnonzero(members)
         step = max(1, int(round(cell / float(self.p["unit"]))))
-        key = (self.Y[idx].astype(np.int64) // step) * (int(self.X[: self.n].max()) // step + 1) + self.X[idx] // step
-        off = np.abs(self._heights_sorted()[idx])
+        x, y = self._core.x, self._core.y
+        key = (y[idx].astype(np.int64) // step) * (int(x.max()) // step + 1) + x[idx] // step
+        off = np.abs(self._core.heights()[idx])
         o = np.lexsort((off, key))
         first = np.concatenate(([True], key[o][1:] != key[o][:-1]))
         keep = np.zeros(self.n, bool)
@@ -600,13 +462,13 @@ class GroundRun:
 
     def ground(self):
         """Surface points plus the points in the thin band about the surface."""
-        return self._unsort((self.ptri == -2) | self._members_sorted())
+        return self._unsort(self._core.surface_mask() | self._members_sorted())
 
     def heights(self):
-        return self._unsort(self._heights_sorted())
+        return self._unsort(self._core.heights())
 
     def low(self):
         return self._unsort(self.low_sorted)
 
     def check(self):
-        return int(self.lib.ptd_check(ctypes.byref(self.state)))
+        return self._core.check()

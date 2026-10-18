@@ -1,8 +1,9 @@
 # Ground engine
 
 Progressive TIN densification (Axelsson 2000), following the TerraScan-style ground routine. The source paper and notes are in `docs/reference/`.
-The triangulation lives in `native/ptdcore.c` (freestanding C, no dependencies);
-`src/ground_classifier/fast_ground.py` drives it from Python. The ground is close to
+The triangulation lives in `native/ptdcore.c` (freestanding C, no dependencies, no memory allocation);
+`src/ground_classifier/ptdcore.py` is its Python front (loading, the arrays it works on, their memory) and
+`src/ground_classifier/fast_ground.py` drives it. The ground is close to
 TerraScan's, not identical.
 
 ## Algorithm

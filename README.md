@@ -7,10 +7,10 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (core wrapper), `config`, `units`, `manifest`, `compare` |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare` |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json` |
-| `tests/` | core self-checks, the real-tile regression test (`fixtures/`) and the TerraScan validation suite (`validation/`) |
+| `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
 | `scripts/windows/` | `setup.bat`, `run.bat`, `test.bat` |
 | `docs/` | `engine.md`, `reference/` (the paper and notes) |
 | `data/` | read-only inputs and the TerraScan benchmark (`output/terra`); not tracked |
@@ -22,6 +22,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
     make build     # compile the core into build/ (needs clang or gcc)
     make test        # engine self-checks, ends with ALL OK
     make regression  # real-tile end-to-end regression test, ends with ALL OK
+    make memory      # memory-use regression test on the four clips, ends with ALL OK
     make validate    # precision / recall / F1 against the TerraScan clips
 
 ## Tests
@@ -30,9 +31,10 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 |---|---|
 | `make test` | Engine checks: synthetic terrain, and the four clips against a ground mask recorded on Linux. Core only. |
 | `make regression` | The whole tool on a real tile: has the output changed? Use it while refactoring. |
+| `make memory` | The engine's memory use on the four clips: has it grown? Use it while refactoring. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
-All three are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
+All four are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
 
 ### Regression test
 
@@ -63,6 +65,35 @@ To make a reference from an earlier version of the code, export it, build its co
 The reference was made from commit `f6e7655` on macOS arm64. Results are expected to match on other platforms but this has
 not been tried; if it fails on a new platform, check that before suspecting the code.
 
+### Memory test
+
+`tests/test_memory.py` measures the memory the engine uses and compares it with `tests/fixtures/memory_reference.json`. The
+compiled core allocates nothing (all its arrays are numpy arrays made in Python), so `tracemalloc` sees what the engine holds.
+On each of the four clips in `tests/validation/clips` it records, in bytes above the input arrays: the peak of
+`GroundRun(...).run()`, what is still held when it finishes, the extra peak of each output (`ground()`, `heights()`,
+`model()`, `low()`), the peak of each stage, and what is left once the run is released. One more run of the steep clip starts
+with a tiny triangle array so that the growth of those arrays is measured too. It takes a few seconds.
+
+A number passes when it is within 2% (plus 16 KiB) of the reference; a number more than 5% below it passes with a note to
+update the reference. The point counts and ground counts must match exactly. It also fails if the clips or
+`fast_ground.DEFAULTS` differ from those the reference was made with.
+
+It does not see memory allocated outside Python and numpy: scipy's KD-tree in the low-point filter, laspy and lazrs, and
+scratch space inside numpy sorts. It guards the engine, not the whole-process peak.
+
+The stage peaks are taken by wrapping the private stage methods of `GroundRun` (`_filter_low_points`, `_choose_seeds`,
+`_build_state`, `_grow`, `_prune_spikes`), so those names must stay.
+
+To update the reference after a deliberate change that alters memory use:
+
+1. Confirm the change is intended and `make test` and `make regression` still pass.
+2. `.venv/bin/python tests/test_memory.py --write-reference --note "what changed and why"` (it measures twice and refuses to
+   write if the two disagree by more than 0.5%).
+3. Commit `memory_reference.json`.
+
+A reference can be made from an earlier version of the code the same way as for the regression test (`PYTHONPATH` at that
+version's `src`), provided that version has the stage methods named above.
+
 ## Run
 
     .venv/bin/ground-classify data/LGE_feet/input_from_FLAI --units usft --output-dir output/LGE_feet
@@ -74,7 +105,7 @@ never into an input folder. `ground-classify --help` lists the options; settings
 ## Versions and the manifest
 
 The version is `ground_classifier.__version__` (`ground-classify --version`); the compiled core has its own number
-(`PTD_VERSION` in `native/ptdcore.c` = `CORE_VERSION` in `fast_ground.py`). Every run writes `manifest.json` into the output
+(`PTD_VERSION` in `native/ptdcore.c` = `CORE_VERSION` in `ptdcore.py`). Every run writes `manifest.json` into the output
 folder, overwriting the previous one: software versions, git commit and dirty flag, library versions, command line, resolved
 settings, and per file the unit, status, point count and class counts. Each output file also carries
 `ground-classifier <version>` in its LAS header `generating_software`, and existing outputs are reused only when that matches

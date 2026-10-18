@@ -8,7 +8,7 @@ from pathlib import Path
 
 import laspy
 
-from . import __version__, fast_ground, manifest
+from . import __version__, manifest, ptdcore
 from ._log import log
 from .config import RunConfig, load_run_config, resolve_config_dir
 from .pipeline import (
@@ -44,7 +44,7 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true",
                         help="Reprocess outputs that already exist from this version.")
     parser.add_argument("--version", action="version",
-                        version=f"ground-classifier {__version__} (core {fast_ground.CORE_VERSION})")
+                        version=f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION})")
     args = parser.parse_args(argv)
     if args.workers < 0 or args.ram_limit_gb < 0:
         parser.error("--workers and --ram-limit-gb must be zero or greater.")
@@ -81,7 +81,7 @@ def classify(args: argparse.Namespace) -> int:
     if any(path.parent == output_dir for path in inputs):
         raise SystemExit(f"Output folder {output_dir} holds input files; choose another --output-dir.")
     try:
-        fast_ground.load_library()
+        ptdcore.load()
     except OSError as exc:
         raise SystemExit(f"Compiled core unavailable: {exc}") from exc
 
@@ -113,7 +113,7 @@ def classify(args: argparse.Namespace) -> int:
     }
     status, error, exit_code = "completed", None, 0
 
-    log(f"ground-classifier {__version__} (core {fast_ground.CORE_VERSION}); output: {output_dir}")
+    log(f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION}); output: {output_dir}")
     try:
         reused = len(pairs) - len(tasks)
         if reused:

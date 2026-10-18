@@ -53,12 +53,12 @@ def software_versions() -> dict:
     import numpy
     import scipy
 
-    from . import __version__, fast_ground
+    from . import __version__, ptdcore
 
     return {
         "name": "ground-classifier",
         "version": __version__,
-        "core_version": fast_ground.CORE_VERSION,
+        "core_version": ptdcore.CORE_VERSION,
         "git": git_state(),
         "python": platform.python_version(),
         "numpy": numpy.__version__,
