@@ -28,6 +28,17 @@ gx = np.concatenate((gx, gx[:5000])); gy = np.concatenate((gy, gy[:5000])); gz =
 r = go(gx, gy, gz); ok("regular grid with duplicate XY: triangulation valid", r.check() == 0, f"{int(r.ground().sum()):,} ground of {gx.size:,}")
 # 3. the answer does not depend on how the memory grew
 r2 = go(x, y, z, small=True); ok("same result when arrays are enlarged mid-run", np.array_equal(g, r2.ground()) and np.array_equal(h, r2.heights()))
+# 3b. the triangle arrays cannot grow past their ceiling: an error, not an endless loop
+ceiling = ptdcore.Core.max_capacity
+ptdcore.Core.max_capacity = staticmethod(lambda n: 1024)
+try:
+    go(x, y, z, small=True); stopped = False
+except RuntimeError:
+    stopped = True
+finally:
+    ptdcore.Core.max_capacity = staticmethod(ceiling)
+ok("arrays at their ceiling that are still asked for room: error, not an endless loop", stopped)
+ok("ceiling: 2n + 8 triangles", ptdcore.Core.max_capacity(n) == 2 * n + 8)
 # 4. isolated low points: kept out, labelled; a real pit is kept
 z2 = z.copy(); low = np.flatnonzero(~obj)[:300]; z2[low] -= rng.uniform(1.0, 30.0, 300)
 r = go(x, y, z2); g2 = r.ground(); ok("isolated low points kept out of the ground", g2[low].sum() == 0 and r.low()[low].mean() > 0.95, f"flagged {100*r.low()[low].mean():.0f}%")

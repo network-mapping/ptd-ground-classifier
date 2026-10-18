@@ -24,9 +24,11 @@ Bytes held, with n the number of points and T the capacity in triangles:
     per point       X 4, Y 4, Z 8, next 4, ptri 4, locked 1, vtouch 1, vtri 4, staged picks 4   = 34 bytes
     per triangle    tv 12, tn 12, thead 4, ttail 4, tinq 1, queue 4, stack 8                    = 45 bytes (+ 64 fixed)
 
-T starts at max(1024, min(2n + 8, 4 * seeds + n // 8 + 1024)) and doubles (never beyond 2n + 8) whenever the
-core reports it is full; each doubling briefly holds the old and the new arrays together. The caller's own arrays
-(the sorted integer coordinates, the low-point flags, the seeds) are not counted here.
+T starts at `Core.default_capacity` and doubles whenever the core reports it is full, never beyond
+`Core.max_capacity(n)` = 2n + 8, which is the most a block of n points can use (see there). Growing replaces the
+triangle arrays one at a time, so an old and a new copy of one array are alive together, not of all of them. If the
+ceiling were ever reached with the core still asking for room, `Core` raises RuntimeError instead of looping. The
+caller's own arrays (the sorted integer coordinates, the low-point flags, the seeds) are not counted here.
 
 Units and conventions. Horizontal coordinates are whole numbers of `AcceptanceParams.unit` metres, relative to a
 local origin (|value| < 2**30, the corner vertices included), heights are metres. Point k is index k of every
@@ -456,9 +458,28 @@ class Core:
         self._picks = np.empty(n, np.int32)
 
     @staticmethod
+    def max_capacity(n: int) -> int:
+        """The most triangles (slots in the triangle arrays) a block of n points can ever use: 2n + 8.
+
+        The surface starts as 2 triangles and each insertion adds exactly 2 (a split; edge flips only rearrange
+        triangles). A point is inserted at most once: a point at the same position as a vertex, and a locked point,
+        is never inserted, and a vertex taken out as a spike is locked. So at most 2 + 2n slots are ever used. The other 6 are
+        slack for the core's check `m + 2 <= capacity`, made before each insertion. Taking a vertex out does not give
+        its slots back, but it takes no new ones either.
+
+        The triangle arrays are never grown past this. The first allocation of a block under about 500 points
+        (`default_capacity` has a floor of 1024) can be larger; it never needs to grow.
+        """
+        return 2 * n + 8
+
+    @staticmethod
     def default_capacity(n: int, n_seeds: int) -> int:
-        """The first size of the triangle arrays, in triangles, for n points and the given number of seeds."""
-        return max(1024, min(2 * n + 8, 4 * n_seeds + n // 8 + 1024))
+        """The first size of the triangle arrays, in triangles, for n points and the given number of seeds.
+
+        An estimate of a seed count plus n / 8 triangles (about 6% of the points becoming vertices, 2 triangles each),
+        at least 1024 and at most `max_capacity(n)`. The arrays are enlarged when it proves too small.
+        """
+        return max(1024, min(Core.max_capacity(n), 4 * n_seeds + n // 8 + 1024))
 
     @property
     def n(self) -> int:
@@ -517,13 +538,33 @@ class Core:
         s.thead = _ptr(self._thead, _i32p); s.ttail = _ptr(self._ttail, _i32p)
         s.tinq = _ptr(self._tinq, _u8p); s.queue = _ptr(self._queue, _i32p); s.stack = _ptr(self._stack, _i32p)
 
+    def _enlarge(self, wanted: int) -> bool:
+        """Grow the triangle arrays to `wanted` triangles, but not past `max_capacity`; False if that is no growth."""
+        target = min(wanted, self.max_capacity(self._n))
+        if target <= self._mcap:
+            return False
+        self._allocate(target)
+        return True
+
+    def _ceiling_error(self) -> RuntimeError:
+        return RuntimeError(
+            f"the compiled core needs more than {self._mcap} triangles for {self._n} points, but a block of {self._n} "
+            f"points cannot use more than max_capacity = {self.max_capacity(self._n)}: the assumptions behind it do not hold")
+
     def densify(self) -> None:
         """Insert candidates until none passes the acceptance test: the plain progressive TIN.
 
-        The seeds go in first. The triangle arrays are enlarged as often as needed.
+        The seeds go in first. The triangle arrays are doubled each time the core reports they are full.
+
+        Raises
+        ------
+        RuntimeError
+            If the core reports the arrays full and they cannot grow, because they are at `max_capacity`. This
+            cannot happen while the assumptions behind `max_capacity` hold; it is a guard against looping forever.
         """
         while self._lib.ptd_run(ctypes.byref(self._state), 0) != 0:
-            self._allocate(min(2 * self._n + 8, 2 * self._mcap))
+            if not self._enlarge(2 * self._mcap):
+                raise self._ceiling_error()
 
     def frontier(self, params: FollowParams) -> int:
         """Find candidates by following the surface past the edge of what is known; stage them.
@@ -587,9 +628,18 @@ class Core:
         -------
         int
             How many were inserted; fewer than `k` when some were no longer in a triangle's list (already taken).
+
+        Raises
+        ------
+        RuntimeError
+            If the arrays cannot hold `k` more insertions and cannot grow, because they are at `max_capacity`.
+            This cannot happen while the assumptions behind `max_capacity` hold.
         """
-        if self._state.m + 2 * k + 8 > self._mcap:
-            self._allocate(min(2 * self._n + 8, max(2 * self._mcap, int(self._state.m) + 2 * k + 8)))
+        needed = int(self._state.m) + 2 * k         # slots in use after k insertions
+        if needed + 8 > self._mcap:
+            grew = self._enlarge(max(2 * self._mcap, needed + 8))
+            if not grew and needed > self._mcap:    # at the ceiling, with only the slack left: still enough
+                raise self._ceiling_error()
         return int(self._lib.ptd_insert(ctypes.byref(self._state), _ptr(self._picks, _i32p), k))
 
     def remove_staged(self, k: int) -> int:
