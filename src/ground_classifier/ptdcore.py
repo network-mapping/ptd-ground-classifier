@@ -44,6 +44,7 @@ import ctypes
 import os
 import sys
 from dataclasses import astuple, dataclass
+from typing import NamedTuple
 
 import numpy as np
 
@@ -177,6 +178,29 @@ def _self_test(lib) -> None:
 
 def _ptr(a, t):
     return a.ctypes.data_as(t)
+
+
+_FIELD_TYPES = dict(_State._fields_)
+
+
+class _TriArray(NamedTuple):
+    """One of the arrays whose size follows the triangle capacity. `name` is also its field in `_State`."""
+    name: str
+    per: int                    # entries per triangle of capacity
+    dtype: type
+    extra: int = 0              # entries added whatever the capacity
+    carried: bool = True        # its contents are copied across when it is replaced by a larger one
+
+
+_TRIANGLE_ARRAYS = (
+    _TriArray("tv", 3, np.int32),
+    _TriArray("tn", 3, np.int32),
+    _TriArray("thead", 1, np.int32),
+    _TriArray("ttail", 1, np.int32),
+    _TriArray("tinq", 1, np.uint8),
+    _TriArray("queue", 1, np.int32, carried=False),             # circular: `Core._allocate` unwraps it instead
+    _TriArray("stack", 2, np.int32, extra=16, carried=False),   # scratch space of one insertion
+)
 
 
 @dataclass(frozen=True)
@@ -511,32 +535,36 @@ class Core:
         """Integer y of the n points: a view of the held array, not a copy. Do not write to it."""
         return self._Y[: self._n]
 
+    def _resized(self, spec: _TriArray, mcap: int) -> np.ndarray:
+        """A new array for `spec` sized for `mcap` triangles, with the old contents at its front if `spec` carries them.
+
+        Called while the old array is still the attribute and `self._mcap` is still the old capacity (0 for the first
+        allocation, when there is nothing to carry).
+        """
+        new = np.empty(spec.per * mcap + spec.extra, spec.dtype)
+        if self._mcap and spec.carried:
+            old = getattr(self, "_" + spec.name)
+            new[: old.size] = old
+        return new
+
     def _allocate(self, mcap: int) -> None:
-        """Make the triangle arrays hold `mcap` triangles, carrying over what is in them, and re-point the structure."""
+        """Make the triangle arrays hold `mcap` triangles, carrying over what is in them, and re-point the structure.
+
+        The arrays are replaced one at a time, so an old and a new copy of only one of them are alive together.
+        """
         s = self._state
         old = self._mcap
-
-        def grow(name, per, dtype):
-            a = np.empty(per * mcap + (16 if name == "stack" else 0), dtype)
-            if old and name != "stack":
-                b = getattr(self, "_" + name)
-                a[: b.size] = b
-            setattr(self, "_" + name, a)
-            return a
-
-        if old:   # straighten the circular queue before it is enlarged
-            live = self._queue[(s.qhead + np.arange(s.qcount)) % old].copy()
-        grow("tv", 3, np.int32); grow("tn", 3, np.int32)
-        grow("thead", 1, np.int32); grow("ttail", 1, np.int32)
-        grow("tinq", 1, np.uint8); grow("queue", 1, np.int32); grow("stack", 2, np.int32)
+        if old:   # the queue starts at qhead and may wrap round the end: unwrap it to the front of the larger one
+            live = self._queue[(s.qhead + np.arange(s.qcount)) % old]
+        for spec in _TRIANGLE_ARRAYS:
+            setattr(self, "_" + spec.name, self._resized(spec, mcap))
         if old:
             self._queue[: live.size] = live
             s.qhead = 0
         self._mcap = mcap
         s.mcap = mcap
-        s.tv = _ptr(self._tv, _i32p); s.tn = _ptr(self._tn, _i32p)
-        s.thead = _ptr(self._thead, _i32p); s.ttail = _ptr(self._ttail, _i32p)
-        s.tinq = _ptr(self._tinq, _u8p); s.queue = _ptr(self._queue, _i32p); s.stack = _ptr(self._stack, _i32p)
+        for spec in _TRIANGLE_ARRAYS:
+            setattr(s, spec.name, _ptr(getattr(self, "_" + spec.name), _FIELD_TYPES[spec.name]))
 
     def _enlarge(self, wanted: int) -> bool:
         """Grow the triangle arrays to `wanted` triangles, but not past `max_capacity`; False if that is no growth."""
