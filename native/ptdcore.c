@@ -1123,7 +1123,7 @@ EXPORT void ptd_requeue(PtdState *s)
             enqueue(s, (i32)t);
 }
 
-/* Bumped whenever the behaviour or the interface changes; fast_ground.py
+/* Bumped whenever the behaviour or the interface changes; ptdcore.py
  * refuses a library whose number is not the one it was written for. */
 #define PTD_VERSION 10
 EXPORT i64 ptd_version(void)
