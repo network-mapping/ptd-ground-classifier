@@ -30,8 +30,8 @@ from . import ptdcore
 
 @dataclass(frozen=True)
 class Block:
-    """How the block's coordinates are held: as integers, as a LAS file holds them (but at the engine's own scale)."""
-    scale: float = 0.001                # m per integer step: horizontal coordinates are held as whole numbers of this
+    """How a block's horizontal coordinates are held inside the engine: as integers."""
+    scale: float = 0.001                # scale factor from integer horizontal coordinates to float metres: metres = integer * scale
 
 
 @dataclass(frozen=True)
@@ -215,8 +215,9 @@ def isolated_low_points(xi, yi, z, scale, cell, neighbours, radius, drop, passes
     z : float array, one value per point
         Elevations in metres. Not scaled by `scale`: they are compared directly with `drop`.
     scale : float
-        Metres per step of `xi` / `yi` (the `block.scale` setting). It only quantises the horizontal coordinates,
-        like the scale in a LAS header; it is not read from one, and it is not the project's coordinate unit.
+        Scale factor that converts the integer `xi` / `yi` back to float metres (the `block.scale` setting):
+        metres = integer * scale. It is the engine's own scale, not read from the LAS header, and it is
+        not the project's coordinate unit.
     cell : float
         Side of the squares, in metres, whose lowest point is examined (the `low_points.cell` setting).
     neighbours : int

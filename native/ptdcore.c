@@ -75,7 +75,7 @@ typedef struct PtdState {
     i64 nseeds;
     i64 seed_pos;
     /* acceptance rule */
-    double scale;       /* metres per integer coordinate step (like a LAS scale) */
+    double scale;       /* scale factor: integer horizontal coordinate -> metres */
     double sin2_limit;  /* sin^2(iteration angle) */
     double up_dist;     /* iteration distance above the triangle plane, m */
     double down_dist;   /* and below it */

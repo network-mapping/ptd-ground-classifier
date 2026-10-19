@@ -215,7 +215,7 @@ class AcceptanceParams:
     Attributes
     ----------
     scale : float
-        Metres per integer step of the horizontal coordinates.
+        Scale factor from the integer horizontal coordinates to float metres.
     sin_flat : float
         Sine of the iteration angle on ground no steeper than `tan_flat`.
     sin_steep : float
