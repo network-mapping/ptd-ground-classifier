@@ -30,8 +30,8 @@ triangle arrays one at a time, so an old and a new copy of one array are alive t
 ceiling were ever reached with the core still asking for room, `Core` raises RuntimeError instead of looping. The
 caller's own arrays (the sorted integer coordinates, the low-point flags, the seeds) are not counted here.
 
-Units and conventions. Horizontal coordinates are whole numbers of `AcceptanceParams.scale` metres (the way a LAS file
-holds integer coordinates with a scale), relative to a
+Units and conventions. Horizontal coordinates are whole numbers of `COORDINATE_SCALE` metres (passed to the core as
+`AcceptanceParams.scale`), relative to a
 local origin (|value| < 2**30, the corner vertices included), heights are metres. Point k is index k of every
 per-point array; the four corner vertices that bound the surface are indices n .. n + 3 of X, Y and Z and are never
 candidates. Per-point arrays are in whatever order the caller gave them (`GroundRun` sorts them spatially, which
@@ -45,9 +45,34 @@ import ctypes
 import os
 import sys
 from dataclasses import astuple, dataclass
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 import numpy as np
+
+# Scale factor from the core's integer horizontal coordinates to float metres: metres = integer * COORDINATE_SCALE.
+# It is how the engine represents coordinates, not a tuning setting: block sizes and cell sizes are rounded to whole
+# steps of it, so changing it changes results. It is not read from the LAS header and is not the input's unit
+# (coordinates are converted to metres before they reach the engine).
+COORDINATE_SCALE: Final[float] = 0.001
+
+
+# The core takes horizontal coordinates only as integer steps of COORDINATE_SCALE. These are the one way to get them
+# in and out of float metres, so the rounding rule is the same everywhere (nearest step, halves to even).
+
+def metres_to_steps(metres, origin=0.0):
+    """Horizontal coordinates in float metres -> integer steps counted from `origin` (metres): an int64 array,
+    the form `with_corners` and `Core` take."""
+    return np.rint((np.asarray(metres) - origin) / COORDINATE_SCALE).astype(np.int64)
+
+
+def steps_to_metres(steps):
+    """Integer steps -> float metres (a float64 array), measured from the same origin they were counted from."""
+    return np.asarray(steps).astype(np.float64) * COORDINATE_SCALE
+
+
+def length_to_steps(metres):
+    """A distance in metres -> a whole number of steps (an int)."""
+    return int(round(metres / COORDINATE_SCALE))
 
 _i32p = ctypes.POINTER(ctypes.c_int32)
 _f64p = ctypes.POINTER(ctypes.c_double)
@@ -158,16 +183,16 @@ def load(path: str | None = None) -> ctypes.CDLL:
 def _self_test(lib) -> None:
     """A few milliseconds on a known surface: proves the library really works in this process."""
     rng = np.random.default_rng(1)
-    n, scale = 4000, 0.001
+    n = 4000
     x = rng.uniform(0.0, 80.0, n); y = rng.uniform(0.0, 80.0, n)
     z = 0.05 * x + 0.02 * y + rng.normal(0.0, 0.01, n)
     z[:400] += rng.uniform(2.0, 9.0, 400)          # things standing on the surface
-    xi = np.rint(x / scale).astype(np.int64); yi = np.rint(y / scale).astype(np.int64)
+    xi = metres_to_steps(x); yi = metres_to_steps(y)
     quadrant = (x > 40.0).astype(int) + 2 * (y > 40.0)
     seeds = np.array([np.flatnonzero(quadrant == q)[np.argmin(z[quadrant == q])] for q in range(4)], dtype=np.int32)
     X, Y, Z = with_corners(xi, yi, z, seeds, int(xi.max()), int(yi.max()), 20000)
     sin6 = float(np.sin(np.radians(6.0)))
-    params = AcceptanceParams(scale=scale, sin_flat=sin6, sin_steep=sin6, tan_flat=0.18, tan_steep=0.7, up_dist=1.4,
+    params = AcceptanceParams(scale=COORDINATE_SCALE, sin_flat=sin6, sin_steep=sin6, tan_flat=0.18, tan_steep=0.7, up_dist=1.4,
                               down_dist=5.0, below_free=0.15, tan2_terrain=float(np.tan(np.radians(70.0)) ** 2),
                               reduce_edge=2.0, reduce_edge_steep=0.5, stop_edge=0.0)
     core = Core(X, Y, Z, seeds, np.zeros(n, np.uint8), params, lib=lib)

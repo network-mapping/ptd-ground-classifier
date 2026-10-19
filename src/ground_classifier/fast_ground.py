@@ -27,12 +27,7 @@ from . import ptdcore
 #     Settings(follow=Follow(rounds=0), turn=Turn(rounds=0))
 # A name that is not a field is an error, so a misspelt setting cannot be silently ignored. The names carry
 # TerraScan's where TerraScan has the same setting. All lengths are metres, all angles degrees.
-
-@dataclass(frozen=True)
-class Block:
-    """How a block's horizontal coordinates are held inside the engine: as integers."""
-    scale: float = 0.001                # scale factor from integer horizontal coordinates to float metres: metres = integer * scale
-
+# The scale of the integer coordinates is not a setting: see ptdcore.COORDINATE_SCALE.
 
 @dataclass(frozen=True)
 class LowPoints:
@@ -128,7 +123,6 @@ class GroundBand:
 
 @dataclass(frozen=True)
 class Settings:
-    block: Block = Block()
     low_points: LowPoints = LowPoints()
     seeds: Seeds = Seeds()
     acceptance: Acceptance = Acceptance()
@@ -151,10 +145,10 @@ class Settings:
 # Conversions from the settings above to the parameter structs the compiled core (ptdcore) takes: the core wants
 # sines, tangents and plain numbers, not degrees and dataclasses.
 
-def _to_ptdcore_acceptance(a, scale):
+def _to_ptdcore_acceptance(a):
     """The acceptance test of the plain progressive TIN, from the settings (degrees become sines and tangents)."""
     return ptdcore.AcceptanceParams(
-        scale=float(scale),
+        scale=ptdcore.COORDINATE_SCALE,
         sin_flat=float(np.sin(np.radians(a.iteration_angle))),
         sin_steep=float(np.sin(np.radians(max(a.steep_iteration_angle, a.iteration_angle)))),
         tan_flat=float(np.tan(np.radians(a.flat_slope))),
@@ -191,7 +185,7 @@ def _to_ptdcore_spikes(s):
         min_neighbours=int(s.neighbours))
 
 
-def isolated_low_points(xi, yi, z, scale, cell, neighbours, radius, drop, passes, min_neighbours=3):
+def isolated_low_points(xi, yi, z, cell, neighbours, radius, drop, passes, min_neighbours=3):
     """Isolated low points - the job TerraScan's separate 'Low points' routine does before Ground.
 
     Works in two steps:
@@ -210,14 +204,10 @@ def isolated_low_points(xi, yi, z, scale, cell, neighbours, radius, drop, passes
     Parameters
     ----------
     xi, yi : integer arrays, one value per point
-        Horizontal coordinates as whole multiples of `scale`, measured from the block's lower-left corner
-        (non-negative).
+        Horizontal coordinates as the core holds them: integer steps (`ptdcore.metres_to_steps`), counted from the
+        block's lower-left corner (non-negative).
     z : float array, one value per point
-        Elevations in metres. Not scaled by `scale`: they are compared directly with `drop`.
-    scale : float
-        Scale factor that converts the integer `xi` / `yi` back to float metres (the `block.scale` setting):
-        metres = integer * scale. It is the engine's own scale, not read from the LAS header, and it is
-        not the project's coordinate unit.
+        Elevations in metres, compared directly with `drop`.
     cell : float
         Side of the squares, in metres, whose lowest point is examined (the `low_points.cell` setting).
     neighbours : int
@@ -260,7 +250,7 @@ def isolated_low_points(xi, yi, z, scale, cell, neighbours, radius, drop, passes
             f"a point cannot have more than {neighbours} neighbours, so no point could ever be flagged")
     from scipy.spatial import cKDTree
     n = z.size
-    step = max(1, int(round(cell / scale)))
+    step = max(1, ptdcore.length_to_steps(cell))
     width = int(xi.max()) // step + 1
     key = (yi // step).astype(np.int64) * width + (xi // step)
     order = np.lexsort((z, key))            # by points by square, with each square ordered by lowest z
@@ -274,7 +264,7 @@ def isolated_low_points(xi, yi, z, scale, cell, neighbours, radius, drop, passes
         mins = order[cursor[live]]
         if mins.size <= neighbours:
             break
-        xy = np.column_stack((xi[mins], yi[mins])).astype(np.float64) * scale
+        xy = ptdcore.steps_to_metres(np.column_stack((xi[mins], yi[mins])))
         dist, nb = cKDTree(xy).query(xy, k=neighbours + 1, distance_upper_bound=radius)
         found = np.isfinite(dist[:, 1:])
         nz = np.where(found, z[mins][np.minimum(nb[:, 1:], mins.size - 1)], np.inf)
@@ -393,18 +383,19 @@ class GroundRun:
         p = settings or Settings()
         self.settings = p
         self._lib = lib or ptdcore.load()
-        scale = float(p.block.scale)
         n = int(x.size)
         self.n = n
+        # The core takes horizontal coordinates only as integer steps (ptdcore.COORDINATE_SCALE), counted here from
+        # the block's lower-left corner; x and y must be in metres.
         x0, y0 = float(x.min()), float(y.min())
-        xi = np.rint((x - x0) / scale).astype(np.int64)
-        yi = np.rint((y - y0) / scale).astype(np.int64)
+        xi = ptdcore.metres_to_steps(x, x0)
+        yi = ptdcore.metres_to_steps(y, y0)
         xmax, ymax = int(xi.max()), int(yi.max())
-        margin = int(round(min(max(p.seeds.max_building_size, 30.0), 100.0) / scale))
+        margin = ptdcore.length_to_steps(min(max(p.seeds.max_building_size, 30.0), 100.0))
         if max(xmax, ymax) + 2 * margin >= 2 ** 28:
             raise ValueError("block too large for the compiled core at this scale")
         # memory order = spatial order (2 m rows, then x): the candidates of one triangle sit close together in memory
-        row = max(1, int(round(2.0 / scale)))
+        row = max(1, ptdcore.length_to_steps(2.0))
         order = np.argsort((yi // row) * (xmax + 1) + xi, kind="stable")
         self.order = order
         self._xi = xi[order]; self._yi = yi[order]
@@ -445,7 +436,7 @@ class GroundRun:
         """Find the isolated low points; returns what `choose_seeds` needs."""
         p = self.settings
         low, cell_min, cell_key, width, _ = isolated_low_points(
-            self._xi, self._yi, self._zz, float(p.block.scale), p.low_points.cell, int(p.low_points.neighbours),
+            self._xi, self._yi, self._zz, p.low_points.cell, int(p.low_points.neighbours),
             p.low_points.radius, p.low_points.drop, int(p.low_points.passes))
         self.low_sorted = low
         return cell_min, cell_key, width
@@ -462,7 +453,7 @@ class GroundRun:
         X, Y, Z = ptdcore.with_corners(self._xi, self._yi, self._zz, self.seeds, xmax, ymax, margin)
         del self._xi, self._yi, self._zz        # the core holds its own arrays now
         self._core = ptdcore.Core(X, Y, Z, self.seeds, self.low_sorted,
-                                  _to_ptdcore_acceptance(self.settings.acceptance, self.settings.block.scale),
+                                  _to_ptdcore_acceptance(self.settings.acceptance),
                                   self.initial_capacity, self._lib)
 
     def _follow(self):
@@ -528,7 +519,7 @@ class GroundRun:
         if k == 0 or cell <= 0.0:
             return members
         idx = np.flatnonzero(members)
-        step = max(1, int(round(cell / float(self.settings.block.scale))))
+        step = max(1, ptdcore.length_to_steps(cell))
         x, y = self._core.x, self._core.y
         key = (y[idx].astype(np.int64) // step) * (int(x.max()) // step + 1) + x[idx] // step
         off = np.abs(self._core.heights()[idx])

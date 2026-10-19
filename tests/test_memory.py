@@ -95,7 +95,10 @@ def sha256(path):
 
 
 def defaults_fingerprint():
-    return hashlib.sha256(json.dumps(fg.Settings().flat(), sort_keys=True).encode()).hexdigest()
+    """Hash of everything that sets the engine's behaviour without being a run option: the default settings and the
+    scale of the integer coordinates."""
+    state = {"settings": fg.Settings().flat(), "coordinate_scale": fg.ptdcore.COORDINATE_SCALE}
+    return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
 
 def current():

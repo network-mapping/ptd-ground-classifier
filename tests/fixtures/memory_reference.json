@@ -104,7 +104,7 @@
    "water_clip_buffered.npz": "de1a10d4079fbfd86574e426b5ec457dd5270446eeefeb894b8782d567dcffed"
   },
   "commit": "e493f7e",
-  "defaults_sha256": "05a6966c96faa6290892a22599e1e61e339c95c5e2a6ee2b3cfcb4d40639edcd",
+  "defaults_sha256": "a6baaaf4625cbdeb20b5d5396d277a8d7d4f878c51b9bc7c22c8b80dafe1f289",
   "note": "after ptdcore.Core; picks buffer allocated with the core state",
   "numpy": "2.5.4",
   "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",

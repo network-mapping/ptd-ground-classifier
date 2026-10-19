@@ -14,6 +14,12 @@ def go(x, y, z, settings=None, library=lib, small=False):
         r.initial_capacity = 1024      # force the triangle arrays to be enlarged many times mid-run
     return r.run()
 rng = np.random.default_rng(5)
+# 0. horizontal coordinates: float metres <-> the core's integer steps
+sc = ptdcore.COORDINATE_SCALE
+steps = ptdcore.metres_to_steps(np.array([100.0, 100.0004, 100.0006, 112.345]), 100.0)
+ok("metres to steps: nearest step from the origin, as int64", steps.dtype == np.int64 and steps.tolist() == [0, 0, 1, 12345], str(steps.tolist()))
+ok("steps to metres undoes metres to steps to within half a step", np.allclose(ptdcore.steps_to_metres(steps), [0.0, 0.0, 0.001, 12.345], atol=sc / 2))
+ok("length to steps: whole steps, an int", ptdcore.length_to_steps(1.0) == 1000 and ptdcore.length_to_steps(2.0) == 2000 and isinstance(ptdcore.length_to_steps(1.4), int))
 # 1. random terrain with objects: triangulation valid, objects rejected
 n = 200_000; x = rng.uniform(0, 400, n); y = rng.uniform(0, 400, n); z = 3 * np.sin(x / 40) + 2 * np.cos(y / 55) + rng.normal(0, 0.02, n)
 obj = rng.random(n) < 0.3; z[obj] += rng.uniform(1.5, 20, obj.sum())
