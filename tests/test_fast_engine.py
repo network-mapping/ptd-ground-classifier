@@ -20,7 +20,7 @@ obj = rng.random(n) < 0.3; z[obj] += rng.uniform(1.5, 20, obj.sum())
 r = go(x, y, z); g = r.ground()
 ok("random terrain: triangulation valid", r.check() == 0)
 ok("random terrain: objects rejected, ground found", g[obj].mean() < 0.002 and g[~obj].mean() > 0.5, f"objects taken {100*g[obj].mean():.3f}%, ground taken {100*g[~obj].mean():.1f}%")
-h = r.heights(); mod = r.model(); band = float(r.p["surface_band"])
+h = r.heights(); mod = r.model(); band = float(r.settings.ground_band.width)
 ok("heights: zero on surface points, within the band on the other ground points, objects above", np.all(h[mod] == 0) and np.all(np.abs(h[g]) <= band + 1e-6) and np.median(h[obj]) > 1.0, f"{int(mod.sum()):,} surface points + {int(g.sum() - mod.sum()):,} within {100*band:g} cm of the surface")
 # 2. exactly collinear / regular grid / duplicate XY
 gx, gy = np.meshgrid(np.arange(0, 120, 0.5), np.arange(0, 120, 0.5)); gx = gx.ravel(); gy = gy.ravel(); gz = 0.01 * gx + rng.normal(0, 0.005, gx.size)
@@ -48,7 +48,7 @@ ok("surface elsewhere unchanged by the low points", np.percentile(dh, 99) < 0.05
 n = 300_000; x = rng.uniform(0, 300, n); y = rng.uniform(0, 300, n); d = np.hypot(x - 150, y - 150)
 z = np.where(d < 18, 12.0, np.where(d < 30, 12.0 * (30 - d) / 12.0, 0.0)) + rng.normal(0, 0.02, n)   # flat-topped hill, 45 degree sides
 top = d < 15
-plain = go(x, y, z, {"follow_rounds": 0, "turn_rounds": 0}).ground(); full = go(x, y, z)
+plain = go(x, y, z, fg.Settings(follow=fg.Follow(rounds=0), turn=fg.Turn(rounds=0))).ground(); full = go(x, y, z)
 ok("hill top: missed by the plain routine, reached by following and turning", plain[top].mean() < 0.05 and full.ground()[top].mean() > 0.5 and full.check() == 0, f"plain {100*plain[top].mean():.1f}%, with following {100*full.ground()[top].mean():.1f}%")
 # 6. a building (vertical walls) is NOT climbed
 z = np.where((np.abs(x - 150) < 20) & (np.abs(y - 150) < 20), 6.0, 0.0) + rng.normal(0, 0.02, n); roof = (np.abs(x - 150) < 19.5) & (np.abs(y - 150) < 19.5)

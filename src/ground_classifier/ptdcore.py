@@ -30,7 +30,8 @@ triangle arrays one at a time, so an old and a new copy of one array are alive t
 ceiling were ever reached with the core still asking for room, `Core` raises RuntimeError instead of looping. The
 caller's own arrays (the sorted integer coordinates, the low-point flags, the seeds) are not counted here.
 
-Units and conventions. Horizontal coordinates are whole numbers of `AcceptanceParams.unit` metres, relative to a
+Units and conventions. Horizontal coordinates are whole numbers of `AcceptanceParams.scale` metres (the way a LAS file
+holds integer coordinates with a scale), relative to a
 local origin (|value| < 2**30, the corner vertices included), heights are metres. Point k is index k of every
 per-point array; the four corner vertices that bound the surface are indices n .. n + 3 of X, Y and Z and are never
 candidates. Per-point arrays are in whatever order the caller gave them (`GroundRun` sorts them spatially, which
@@ -61,7 +62,7 @@ class _State(ctypes.Structure):
         ("tv", _i32p), ("tn", _i32p), ("thead", _i32p), ("ttail", _i32p), ("tinq", _u8p), ("queue", _i32p), ("stack", _i32p),
         ("mcap", ctypes.c_int64), ("m", ctypes.c_int64), ("qhead", ctypes.c_int64), ("qcount", ctypes.c_int64),
         ("seeds", _i32p), ("nseeds", ctypes.c_int64), ("seed_pos", ctypes.c_int64),
-        ("unit", ctypes.c_double), ("sin2_limit", ctypes.c_double), ("up_dist", ctypes.c_double), ("down_dist", ctypes.c_double),
+        ("scale", ctypes.c_double), ("sin2_limit", ctypes.c_double), ("up_dist", ctypes.c_double), ("down_dist", ctypes.c_double),
         ("tan2_terrain", ctypes.c_double), ("reduce_edge", ctypes.c_double), ("stop_edge", ctypes.c_double), ("below_free", ctypes.c_double),
         ("n_ground", ctypes.c_int64), ("n_tests", ctypes.c_int64), ("n_flips", ctypes.c_int64), ("initialised", ctypes.c_int32),
         ("locked", _u8p), ("mode", ctypes.c_int32), ("vtouch", _u8p), ("vtri", _i32p),
@@ -157,16 +158,16 @@ def load(path: str | None = None) -> ctypes.CDLL:
 def _self_test(lib) -> None:
     """A few milliseconds on a known surface: proves the library really works in this process."""
     rng = np.random.default_rng(1)
-    n, unit = 4000, 0.001
+    n, scale = 4000, 0.001
     x = rng.uniform(0.0, 80.0, n); y = rng.uniform(0.0, 80.0, n)
     z = 0.05 * x + 0.02 * y + rng.normal(0.0, 0.01, n)
     z[:400] += rng.uniform(2.0, 9.0, 400)          # things standing on the surface
-    xi = np.rint(x / unit).astype(np.int64); yi = np.rint(y / unit).astype(np.int64)
+    xi = np.rint(x / scale).astype(np.int64); yi = np.rint(y / scale).astype(np.int64)
     quadrant = (x > 40.0).astype(int) + 2 * (y > 40.0)
     seeds = np.array([np.flatnonzero(quadrant == q)[np.argmin(z[quadrant == q])] for q in range(4)], dtype=np.int32)
     X, Y, Z = with_corners(xi, yi, z, seeds, int(xi.max()), int(yi.max()), 20000)
     sin6 = float(np.sin(np.radians(6.0)))
-    params = AcceptanceParams(unit=unit, sin_flat=sin6, sin_steep=sin6, tan_flat=0.18, tan_steep=0.7, up_dist=1.4,
+    params = AcceptanceParams(scale=scale, sin_flat=sin6, sin_steep=sin6, tan_flat=0.18, tan_steep=0.7, up_dist=1.4,
                               down_dist=5.0, below_free=0.15, tan2_terrain=float(np.tan(np.radians(70.0)) ** 2),
                               reduce_edge=2.0, reduce_edge_steep=0.5, stop_edge=0.0)
     core = Core(X, Y, Z, seeds, np.zeros(n, np.uint8), params, lib=lib)
@@ -213,8 +214,8 @@ class AcceptanceParams:
 
     Attributes
     ----------
-    unit : float
-        Metres per whole number of the integer coordinates.
+    scale : float
+        Metres per integer step of the horizontal coordinates.
     sin_flat : float
         Sine of the iteration angle on ground no steeper than `tan_flat`.
     sin_steep : float
@@ -241,7 +242,7 @@ class AcceptanceParams:
         Which of the passing candidates a triangle takes first: 0 the smallest angle, 1 the highest above the
         plane, 2 the farthest from the corners, 3 the largest angle.
     """
-    unit: float
+    scale: float
     sin_flat: float
     sin_steep: float
     tan_flat: float
@@ -378,7 +379,7 @@ def with_corners(xi, yi, z, seeds, xmax: int, ymax: int, margin: int):
     Parameters
     ----------
     xi, yi : integer arrays, one value per point
-        Horizontal coordinates in whole units of the core, from a local origin (non-negative).
+        Horizontal coordinates in integer steps of the scale, from a local origin (non-negative).
     z : float array, one value per point
         Heights in metres.
     seeds : int array
@@ -386,7 +387,7 @@ def with_corners(xi, yi, z, seeds, xmax: int, ymax: int, margin: int):
     xmax, ymax : int
         Largest `xi` and `yi`.
     margin : int
-        Distance of the corners from the block, in whole units.
+        Distance of the corners from the block, in integer steps.
 
     Returns
     -------
@@ -420,7 +421,7 @@ class Core:
     Parameters
     ----------
     X, Y : int32 arrays of length n + 4
-        Horizontal coordinates in whole units of `params.unit`; the last four entries are the corner vertices
+        Horizontal coordinates in integer steps of `params.scale`; the last four entries are the corner vertices
         (see `with_corners`). Held, not copied.
     Z : float64 array of length n + 4
         Heights in metres, corners last. Held, not copied.
@@ -464,7 +465,7 @@ class Core:
         s.vtouch = _ptr(self._vtouch, _u8p)
         self._vtri = np.full(n + 4, -1, np.int32)
         s.vtri = _ptr(self._vtri, _i32p)
-        s.unit = params.unit
+        s.scale = params.scale
         s.sin2_limit = params.sin_flat ** 2         # not read by the core; kept so the structure is complete
         s.sin_flat = params.sin_flat
         s.sin_steep = params.sin_steep

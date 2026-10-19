@@ -75,7 +75,7 @@ typedef struct PtdState {
     i64 nseeds;
     i64 seed_pos;
     /* acceptance rule */
-    double unit;        /* metres per integer coordinate unit */
+    double scale;       /* metres per integer coordinate step (like a LAS scale) */
     double sin2_limit;  /* sin^2(iteration angle) */
     double up_dist;     /* iteration distance above the triangle plane, m */
     double down_dist;   /* and below it */
@@ -315,7 +315,7 @@ static i32 pick_candidate(PtdState *s, i32 t, i32 *prev_out)
     if (q < 0)
         return -1;
     const i32 *v = s->tv + 3 * (i64)t;
-    const double u = s->unit;
+    const double u = s->scale;
     const double ax = s->X[v[0]] * u, ay = s->Y[v[0]] * u, az = s->Z[v[0]];
     const double bx = s->X[v[1]] * u, by = s->Y[v[1]] * u, bz = s->Z[v[1]];
     const double cx = s->X[v[2]] * u, cy = s->Y[v[2]] * u, cz = s->Z[v[2]];
@@ -531,7 +531,7 @@ static int ring_of(const PtdState *s, i32 V, i32 *ring, i32 *tri, i32 *out, int 
 __attribute__((noinline))
 static int guide_plane(const PtdState *s, i32 V, double rg, double rms_max, double tan_tilt, double *g)
 {
-    const double u = s->unit;
+    const double u = s->scale;
     const i32 n = (i32)s->n;
     i32 list[GUIDE_CAP], ring[RING_CAP];
     u8 hash[GUIDE_HASH];            /* position in list[], 255 = empty */
@@ -623,7 +623,7 @@ static int guide_plane(const PtdState *s, i32 V, double rg, double rms_max, doub
  * Writes the chosen candidates to picks[] and returns how many. */
 EXPORT i64 ptd_frontier(PtdState *s, const double *prm, i32 *picks)
 {
-    const double u = s->unit;
+    const double u = s->scale;
     const double local2 = prm[0] * prm[0], dmin2 = prm[1] * prm[1],
                  dmax2 = prm[2] * prm[2], tan_up = prm[3], tan_down = prm[4],
                  tan_max = prm[5], guide_r = prm[6], guide_rms = prm[7],
@@ -742,7 +742,7 @@ EXPORT i64 ptd_frontier(PtdState *s, const double *prm, i32 *picks)
 #define HINGE_BINS (HINGE_RADIAL * HINGE_ANGULAR)
 EXPORT i64 ptd_hinge(PtdState *s, const double *prm, i32 *picks)
 {
-    const double u = s->unit;
+    const double u = s->scale;
     const double chord2 = prm[0] * prm[0], rmin = prm[1], rmax = prm[2], tol = prm[3],
                  tan_max = prm[4], min_reach = prm[6], check_r = prm[7], check_tol = prm[8];
     const int min_bins = (int)prm[5];
@@ -917,7 +917,7 @@ EXPORT i64 ptd_insert(PtdState *s, const i32 *picks, i64 count)
 /* Height of every candidate above the finished surface (0 for vertices). */
 EXPORT void ptd_heights(const PtdState *s, float *out)
 {
-    const double u = s->unit;
+    const double u = s->scale;
     for (i64 p = 0; p < s->n; p++) {
         const i32 t = s->ptri[p];
         if (t == PT_VERTEX) {
@@ -954,7 +954,7 @@ EXPORT void ptd_heights(const PtdState *s, float *out)
  * Writes the spikes to list[] and returns how many. */
 EXPORT i64 ptd_spikes(PtdState *s, const double *prm, i32 *list)
 {
-    const double u = s->unit, tan_up = prm[0], h_up = prm[1], tan_down = prm[2], h_down = prm[3];
+    const double u = s->scale, tan_up = prm[0], h_up = prm[1], tan_down = prm[2], h_down = prm[3];
     const int need = (int)prm[4];
     const i32 n = (i32)s->n;
     i64 count = 0;
@@ -1145,7 +1145,7 @@ EXPORT i64 ptd_state_size(void)
  * out[p] = 1 for a member, 0 otherwise; returns how many. */
 EXPORT i64 ptd_members(const PtdState *s, double up, double down, double max_edge, u8 *out)
 {
-    const double u = s->unit, e2max = max_edge * max_edge;
+    const double u = s->scale, e2max = max_edge * max_edge;
     const i32 n = (i32)s->n;
     i64 count = 0;
     for (i64 p = 0; p < s->n; p++)

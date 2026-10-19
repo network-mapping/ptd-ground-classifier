@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import fast_ground
 from ._log import log
 
 CONFIG_ENV_VAR = "GROUND_CLASSIFIER_CONFIG"
@@ -25,29 +26,22 @@ DEFAULT_LOW_VEG_MAX = 0.50
 DEFAULT_MEDIUM_VEG_MAX = 3.00
 DEFAULT_HIGH_VEG_MAX = 200.00
 
-# engine_config.json key -> fast_ground setting (None = a switch, see below).
+# engine_config.json key -> (group, field) of fast_ground.Settings. The defaults are those of the dataclasses;
+# nothing is repeated here.
 ENGINE_KEYS = {
-    "max_building_size": "max_building_size",
-    "terrain_angle": "terrain_angle",
-    "iteration_angle": "iteration_angle",
-    "steep_iteration_angle": "steep_iteration_angle",
-    "iteration_distance": "iteration_distance",
-    "reduce_iteration_angle_when_edge_shorter_than": "reduce_angle_edge",
-    "stop_triangulation_when_edge_shorter_than": "stop_edge",
-    "ground_band": "surface_band",
+    "max_building_size": ("seeds", "max_building_size"),
+    "terrain_angle": ("acceptance", "terrain_angle"),
+    "iteration_angle": ("acceptance", "iteration_angle"),
+    "steep_iteration_angle": ("acceptance", "steep_iteration_angle"),
+    "iteration_distance": ("acceptance", "iteration_distance"),
+    "reduce_iteration_angle_when_edge_shorter_than": ("acceptance", "reduce_angle_edge"),
+    "stop_triangulation_when_edge_shorter_than": ("acceptance", "stop_edge"),
+    "ground_band": ("ground_band", "width"),
 }
-ENGINE_SWITCHES = ("follow_surface", "remove_spikes")
-ENGINE_DEFAULTS = {
-    "max_building_size": 60.0,
-    "terrain_angle": 70.0,
-    "iteration_angle": 6.0,
-    "steep_iteration_angle": 10.0,
-    "iteration_distance": 1.4,
-    "reduce_iteration_angle_when_edge_shorter_than": 2.0,
-    "stop_triangulation_when_edge_shorter_than": 0.0,
-    "ground_band": 0.02,
-    "follow_surface": True,
-    "remove_spikes": True,
+# true/false keys: the groups whose `rounds` is set to 0 when the switch is false.
+ENGINE_SWITCHES = {
+    "follow_surface": ("follow", "turn"),
+    "remove_spikes": ("spikes",),
 }
 
 
@@ -59,7 +53,7 @@ class RunConfig:
     ram_limit_gb: float                         # 0 = automatic
     hag_bands: tuple[float, float, float]       # metres
     engine_values: dict                         # engine_config.json, as the user wrote it
-    engine_settings: dict                       # the same, as fast_ground settings
+    engine_settings: fast_ground.Settings       # the same, as the engine's settings
     files_read: tuple[str, ...] = field(default=())
 
     def as_dict(self) -> dict:
@@ -117,6 +111,42 @@ def _number(data: dict, key: str, default: float, minimum: float = 0.0) -> float
     return value
 
 
+def _load_engine(engine_data: dict) -> tuple[dict, fast_ground.Settings]:
+    """Validate engine_config.json; returns its values (by JSON name) and the fast_ground Settings they make."""
+    unknown = [
+        key for key in engine_data
+        if key not in ENGINE_KEYS and key not in ENGINE_SWITCHES
+        and not key.startswith("_")
+    ]
+    if unknown:
+        raise SystemExit(
+            f"{ENGINE_CONFIG_FILENAME}: unknown setting(s) {unknown}"
+        )
+    defaults = fast_ground.Settings()
+    values: dict = {}
+    changes: dict[str, dict] = {}       # group -> {field: value}
+    for key, (group, name) in ENGINE_KEYS.items():
+        default = getattr(getattr(defaults, group), name)
+        values[key] = _number(engine_data, key, default)
+        changes.setdefault(group, {})[name] = values[key]
+    for key, groups in ENGINE_SWITCHES.items():
+        value = engine_data.get(key, True)
+        if not isinstance(value, bool):
+            raise SystemExit(f"{key} must be true or false (got {value!r})")
+        values[key] = value
+        if not value:
+            for group in groups:
+                changes.setdefault(group, {})["rounds"] = 0
+    try:
+        settings = fast_ground.Settings(**{
+            group: replace(getattr(defaults, group), **fields)
+            for group, fields in changes.items()
+        })
+    except ValueError as exc:
+        raise SystemExit(f"{ENGINE_CONFIG_FILENAME}: {exc}") from exc
+    return values, settings
+
+
 def load_run_config(config_dir: Path) -> RunConfig:
     files_read: list[str] = []
 
@@ -144,35 +174,7 @@ def load_run_config(config_dir: Path) -> RunConfig:
         )
 
     engine_data = _read_json(config_dir, ENGINE_CONFIG_FILENAME, files_read)
-    unknown = [
-        key for key in engine_data
-        if key not in ENGINE_DEFAULTS and not key.startswith("_")
-    ]
-    if unknown:
-        raise SystemExit(
-            f"{ENGINE_CONFIG_FILENAME}: unknown setting(s) {unknown}"
-        )
-    values = dict(ENGINE_DEFAULTS)
-    for key in ENGINE_DEFAULTS:
-        if key in ENGINE_SWITCHES:
-            value = engine_data.get(key, values[key])
-            if not isinstance(value, bool):
-                raise SystemExit(f"{key} must be true or false (got {value!r})")
-            values[key] = value
-        else:
-            values[key] = _number(engine_data, key, values[key])
-    if values["iteration_angle"] <= 0 or values["max_building_size"] <= 0:
-        raise SystemExit("iteration_angle and max_building_size must be above 0")
-
-    settings: dict = {}
-    for key, value in values.items():
-        if key == "follow_surface":
-            settings["follow_rounds"] = 200 if value else 0
-            settings["turn_rounds"] = 60 if value else 0
-        elif key == "remove_spikes":
-            settings["spike_rounds"] = 5 if value else 0
-        else:
-            settings[ENGINE_KEYS[key]] = value
+    engine_values, engine_settings = _load_engine(engine_data)
 
     return RunConfig(
         config_dir=config_dir,
@@ -180,7 +182,7 @@ def load_run_config(config_dir: Path) -> RunConfig:
         workers=workers,
         ram_limit_gb=ram_limit_gb,
         hag_bands=(low, medium, high),
-        engine_values=values,
-        engine_settings=settings,
+        engine_values=engine_values,
+        engine_settings=engine_settings,
         files_read=tuple(files_read),
     )

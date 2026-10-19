@@ -95,7 +95,7 @@ def sha256(path):
 
 
 def defaults_fingerprint():
-    return hashlib.sha256(json.dumps(fg.DEFAULTS, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(fg.Settings().flat(), sort_keys=True).encode()).hexdigest()
 
 
 def current():
@@ -297,7 +297,7 @@ def main():
     print(f"reference: {meta['note']}; commit {meta['commit']}; made on {meta['platform']}", flush=True)
     same = meta["defaults_sha256"] == defaults_fingerprint()
     ok("default settings unchanged since the reference was made", same,
-       "" if same else "fast_ground.DEFAULTS differ: rewrite the reference if that is intended")
+       "" if same else "fast_ground.Settings() defaults differ: rewrite the reference if that is intended")
     ok("clips unchanged since the reference was made",
        meta["clips_sha256"] == {p.name: sha256(p) for p in sorted(CLIPS.glob("*.npz"))})
     import scipy

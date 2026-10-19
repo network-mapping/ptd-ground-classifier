@@ -76,7 +76,7 @@ with a tiny triangle array so that the growth of those arrays is measured too. I
 
 A number passes when it is within 2% (plus 16 KiB) of the reference; a number more than 5% below it passes with a note to
 update the reference. The point counts and ground counts must match exactly. It also fails if the clips or
-`fast_ground.DEFAULTS` differ from those the reference was made with.
+`fast_ground.Settings()` (the defaults) differ from those the reference was made with.
 
 It does not see memory allocated outside Python and numpy: scipy's KD-tree in the low-point filter, laspy and lazrs, and
 scratch space inside numpy sorts. It guards the engine, not the whole-process peak.

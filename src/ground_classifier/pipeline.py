@@ -76,12 +76,12 @@ GENERATING_SOFTWARE = f"ground-classifier {__version__}"
 
 # Settings handed to fast_ground.GroundRun (metres); set per process by
 # configure_engine_settings() because spawned helpers do not inherit them.
-FAST_ENGINE_SETTINGS: dict = {}
+FAST_ENGINE_SETTINGS = fast_ground.Settings()
 
 
-def configure_engine_settings(settings: dict) -> None:
+def configure_engine_settings(settings: fast_ground.Settings) -> None:
     global FAST_ENGINE_SETTINGS
-    FAST_ENGINE_SETTINGS = dict(settings)
+    FAST_ENGINE_SETTINGS = settings
 # A point the low-point filter kept out of the surface is labelled noise (7)
 # only if it ends up at least this far below the finished ground (metres).
 FAST_ENGINE_LOW_NOISE_DEPTH = 0.5
@@ -550,13 +550,13 @@ def classify_block(
         f"      Fast engine: {ground_count:,} ground points of "
         f"{source.size:,} candidates ({surface_count:,} on the surface, "
         f"{ground_count - surface_count:,} within "
-        f"{100 * float(run.p['surface_band']):g} cm of it); surface "
+        f"{100 * float(run.settings.ground_band.width):g} cm of it); surface "
         f"followed past its edge +{run.followed:,}, corners turned "
         f"+{run.turned:,}, spikes taken out {run.spikes_removed:,}; "
         f"isolated low points kept out: {int(np.count_nonzero(low)):,} "
         f"({int(np.count_nonzero(low_noise)):,} labelled class 7)"
     )
-    if run.seed_square < float(FAST_ENGINE_SETTINGS.get("max_building_size", 60.0)):
+    if run.seed_square < float(FAST_ENGINE_SETTINGS.seeds.max_building_size):
         log(
             "      Small block: starting squares reduced to "
             f"{run.seed_square:g} m so the surface has at least three "
@@ -1919,7 +1919,7 @@ def classify_file_worker(
     target_bounds: tuple[float, float, float, float],
     neighbour_bounds: tuple[float, float, float, float],
     hag_bands: tuple[float, float, float],
-    engine_settings: dict,
+    engine_settings: fast_ground.Settings,
     unit_scale: float,
     window_workers: int = 1,
     window_memory_budget: int | None = None,
@@ -1993,7 +1993,7 @@ def run_batch(
     inputs: list[Path],
     unit_scale_by_path: dict[Path, float],
     hag_bands: tuple[float, float, float],
-    engine_settings: dict,
+    engine_settings: fast_ground.Settings,
     requested_workers: int,
     requested_ram_limit_gb: float,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
@@ -2028,9 +2028,14 @@ def run_batch(
     )
 
     configure_engine_settings(engine_settings)
+    changed = engine_settings.changed()
     log(
         "Engine settings (metres): "
-        + ", ".join(f"{k}={v:g}" for k, v in engine_settings.items())
+        + (
+            ", ".join(f"{k}={v:g}" for k, v in changed.items())
+            if changed else "all defaults"
+        )
+        + " (see engine_config.json)"
     )
     cpu_budget = cpu_worker_budget(requested_workers)
     memory_budget = safe_parallel_memory_budget(requested_ram_limit_gb)
