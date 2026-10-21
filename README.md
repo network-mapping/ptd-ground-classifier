@@ -7,7 +7,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare` |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json` |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
@@ -32,9 +32,10 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make test` | Engine checks: synthetic terrain, and the four clips against a ground mask recorded on Linux. Core only. |
 | `make regression` | The whole tool on a real tile: has the output changed? Use it while refactoring. |
 | `make memory` | The engine's memory use on the four clips: has it grown? Use it while refactoring. |
+| `make tin` | The TIN export: PLY writer, `GroundRun.tin()`, per-window meshes, command line. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
-All four are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
+All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
 
 ### Regression test
 
@@ -110,6 +111,18 @@ folder, overwriting the previous one: software versions, git commit and dirty fl
 settings, and per file the unit, status, point count and class counts. Each output file also carries
 `ground-classifier <version>` in its LAS header `generating_software`, and existing outputs are reused only when that matches
 the current version (`--overwrite` forces a rerun).
+
+## Exporting the TIN
+
+    .venv/bin/ground-classify <inputs> --export-tin tins [--tin-max-edge 5] --overwrite
+
+writes the ground surface each window was classified against as `tins/<tile>_w<NN>.ply`: a binary PLY mesh with double
+coordinates, in the input file's own unit, so it lies over the point cloud (CloudCompare opens it directly and proposes its
+own shift for large coordinates; PLY has no offset field). Only the surface vertices are used, and a triangle is written by
+the window whose core holds its centroid, so the meshes of a tile's windows are one TIN without overlap. `--tin-max-edge M`
+leaves out triangles with an edge longer than M metres (guesses across gaps). Outputs that already exist are skipped, so add
+`--overwrite` to export for them. In code: `GroundRun.tin()` gives the triangles, `ground_classifier.ply` writes and reads them.
+`tests/test_tin_export.py` checks it (`make tin`).
 
 ## Compare
 

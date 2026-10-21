@@ -62,7 +62,7 @@ except ImportError as exc:
         "Install dependencies with: pip install -r requirements.txt"
     ) from exc
 
-from . import __version__, fast_ground
+from . import __version__, fast_ground, ply
 from ._log import _LOG_STATE, log
 from .config import (
     DEFAULT_HIGH_VEG_MAX,
@@ -101,6 +101,29 @@ def configure_hag_bands(low: float, medium: float, high: float) -> None:
     LOW_VEG_MAX = low
     MEDIUM_VEG_MAX = medium
     HIGH_VEG_MAX = high
+
+# Optional export of each window's TIN as a PLY mesh (see export_window_tin()).
+# Set per process by configure_tin_export() because spawned helpers do not
+# inherit it. None = no export; the edge limit is in metres, 0 = no limit.
+TIN_EXPORT_DIR: Path | None = None
+TIN_EXPORT_MAX_EDGE = 0.0
+
+
+def configure_tin_export(directory: Path | None, max_edge: float = 0.0) -> None:
+    global TIN_EXPORT_DIR, TIN_EXPORT_MAX_EDGE
+    TIN_EXPORT_DIR = directory
+    TIN_EXPORT_MAX_EDGE = max_edge
+
+
+@dataclass(frozen=True)
+class TinExport:
+    """Where and how one file's window TINs are written."""
+
+    directory: Path
+    stem: str               # file name (without extension) of the input
+    unit_scale: float       # metres per input unit: meshes are written in the input's own unit
+    max_edge: float = 0.0   # metres; triangles with a longer edge are left out (0 = keep all)
+
 
 # Large-file block processing. The overlap is deliberately larger than the
 # 60 m initial seed grid.
@@ -509,12 +532,18 @@ def classify_block(
     y: np.ndarray,
     z: np.ndarray,
     initial_classification: np.ndarray,
+    tin_out: list[np.ndarray] | None = None,
+    tin_max_edge: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Classify one block with the compiled core.
 
     The five source classes are reset and re-labelled 2 / 3 / 4 / 5 / 7,
     every other class is left alone, and the result is (classification,
     height above ground, ground point indices).
+
+    If tin_out is a list, the block's TIN is appended to it as an (m, 3)
+    array of indices into x, y, z (see GroundRun.tin(); tin_max_edge is
+    its max_edge, in metres).
     """
     classification = initial_classification.copy()
     source = np.flatnonzero(reset_input_class_mask(classification))
@@ -544,6 +573,8 @@ def classify_block(
     hag = np.full(x.size, np.nan, dtype=np.float32)
     hag[source] = height
     model = run.model()
+    if tin_out is not None:
+        tin_out.append(source[run.tin(tin_max_edge)])
     surface_count = int(np.count_nonzero(model))
     ground_count = int(np.count_nonzero(ground))
     log(
@@ -704,6 +735,66 @@ def buffered_indices_for_window(
     )
 
 
+def core_point_mask(
+    px: np.ndarray,
+    py: np.ndarray,
+    core: tuple[float, float, float, float],
+    overall_xmax: float,
+    overall_ymax: float,
+) -> np.ndarray:
+    """Which of the positions lie in the window's core. Cores are half-open
+    (lower edge in, upper edge out) except at the file's own upper edge, so
+    every position belongs to exactly one window."""
+    cxmin, cymin, cxmax, cymax = core
+    x_upper = px <= cxmax if cxmax >= overall_xmax else px < cxmax
+    y_upper = py <= cymax if cymax >= overall_ymax else py < cymax
+    return (px >= cxmin) & x_upper & (py >= cymin) & y_upper
+
+
+def export_window_tin(
+    export: TinExport,
+    window_number: int,
+    core: tuple[float, float, float, float],
+    faces: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    overall_xmax: float,
+    overall_ymax: float,
+) -> Path | None:
+    """Write the part of a window's TIN that lies in its core as a PLY mesh.
+
+    faces index x, y, z (the window's points, in metres). A triangle belongs
+    to the window whose core holds its centroid, so neighbouring windows
+    write each triangle once and no vertex is added at the boundary. The
+    mesh is written in the input's own unit. Returns the path, or None if
+    no triangle is left.
+    """
+    if faces.size:
+        centre_x = x[faces].mean(axis=1)
+        centre_y = y[faces].mean(axis=1)
+        faces = faces[
+            core_point_mask(centre_x, centre_y, core, overall_xmax, overall_ymax)
+        ]
+    if not faces.size:
+        return None
+    scale = export.unit_scale
+    xyz = np.column_stack((x / scale, y / scale, z / scale))
+    export.directory.mkdir(parents=True, exist_ok=True)
+    path = export.directory / f"{export.stem}_w{window_number:02d}.ply"
+    ply.write_mesh(
+        path,
+        xyz,
+        faces,
+        (
+            f"ground-classifier {__version__} TIN of {export.stem}, window {window_number}",
+            "triangles whose centroid is in the window core; surface vertices only",
+            f"coordinates in the input unit ({scale:.10g} metres per unit)",
+        ),
+    )
+    return path
+
+
 def classify_window_job(
     window_number: int,
     window_count: int,
@@ -716,6 +807,7 @@ def classify_window_job(
     overall_xmax: float,
     overall_ymax: float,
     allow_sparse_fallback: bool = False,
+    tin_export: TinExport | None = None,
 ) -> WindowResult:
     """Classify one window and return only its non-overlapping core."""
     messages: list[str] = []
@@ -731,28 +823,17 @@ def classify_window_job(
         local_z = z[buffered_indices]
         local_input_class = classification_in[buffered_indices]
 
-        cxmin, cymin, cxmax, cymax = core
-        x_upper = (
-            local_x <= cxmax
-            if cxmax >= overall_xmax
-            else local_x < cxmax
-        )
-        y_upper = (
-            local_y <= cymax
-            if cymax >= overall_ymax
-            else local_y < cymax
-        )
-        core_local = (
-            (local_x >= cxmin)
-            & x_upper
-            & (local_y >= cymin)
-            & y_upper
+        core_local = core_point_mask(
+            local_x, local_y, core, overall_xmax, overall_ymax
         )
 
         try:
             block_started = time.perf_counter()
+            faces: list[np.ndarray] = []
             local_class, local_hag, model = classify_block(
-                local_x, local_y, local_z, local_input_class
+                local_x, local_y, local_z, local_input_class,
+                faces if tin_export is not None else None,
+                tin_export.max_edge if tin_export is not None else 0.0,
             )
             if PERFORMANCE_STAGE_TIMINGS:
                 log(
@@ -794,6 +875,15 @@ def classify_window_job(
                 tuple(messages),
             )
         log(f"      Final TIN model points: {model.size:,}")
+        if tin_export is not None:
+            tin_path = export_window_tin(
+                tin_export, window_number, core, faces[0],
+                local_x, local_y, local_z, overall_xmax, overall_ymax,
+            )
+            log(
+                f"      TIN written: {tin_path}"
+                if tin_path else "      TIN: no triangles in this core"
+            )
         return WindowResult(
             window_number,
             buffered_indices[core_local].copy(),
@@ -838,6 +928,7 @@ def process_file_windows(
     memory_budget: int,
     core_maxima: tuple[float, float] | None = None,
     allow_sparse_fallback: bool = False,
+    tin_export: TinExport | None = None,
 ) -> None:
     """Process windows sequentially or with bounded shared-memory workers."""
     window_count = len(windows)
@@ -874,6 +965,7 @@ def process_file_windows(
                 overall_xmax,
                 overall_ymax,
                 allow_sparse_fallback,
+                tin_export,
             )
             apply_window_result(result, classification_out, hag_out)
         return
@@ -932,6 +1024,7 @@ def process_file_windows(
                 overall_xmax,
                 overall_ymax,
                 allow_sparse_fallback,
+                tin_export,
             )
             pending[future] = estimate
             in_flight_memory += estimate
@@ -1083,6 +1176,13 @@ def classify_file(
             memory_budget,
             safe_parallel_memory_budget(),
         )
+    tin_export = (
+        TinExport(
+            TIN_EXPORT_DIR, input_path.stem, unit_scale, TIN_EXPORT_MAX_EDGE
+        )
+        if TIN_EXPORT_DIR is not None
+        else None
+    )
     processing_started = time.perf_counter()
     process_file_windows(
         windows,
@@ -1096,6 +1196,7 @@ def classify_file(
         memory_budget,
         (target_bounds[2] * unit_scale, target_bounds[3] * unit_scale),
         target_point_count <= SPARSE_FALLBACK_MAX_BUFFERED_POINTS,
+        tin_export,
     )
     if PERFORMANCE_STAGE_TIMINGS:
         log(
@@ -1923,6 +2024,8 @@ def classify_file_worker(
     unit_scale: float,
     window_workers: int = 1,
     window_memory_budget: int | None = None,
+    tin_export_dir_text: str | None = None,
+    tin_max_edge: float = 0.0,
 ) -> FileResult:
     """Top-level process target; paths avoid transferring point arrays.
 
@@ -1934,6 +2037,10 @@ def classify_file_worker(
     configure_runtime(cpu_slots, f"[{input_path.stem}] ")
     configure_hag_bands(*hag_bands)
     configure_engine_settings(engine_settings)
+    configure_tin_export(
+        Path(tin_export_dir_text) if tin_export_dir_text else None,
+        tin_max_edge,
+    )
     configure_neighbour_halo(unit_scale)
     configure_nominal_tile_size(unit_scale)
     return classify_file(
@@ -1996,6 +2103,8 @@ def run_batch(
     engine_settings: fast_ground.Settings,
     requested_workers: int,
     requested_ram_limit_gb: float,
+    tin_export_dir: Path | None = None,
+    tin_max_edge: float = 0.0,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
     """Classify ``tasks`` (input, output) with the resource-aware scheduler.
 
@@ -2027,6 +2136,12 @@ def run_batch(
         f"class 5 >={medium_veg:g} m (see hag_config.json)."
     )
 
+    configure_tin_export(tin_export_dir, tin_max_edge)
+    if tin_export_dir is not None:
+        log(
+            f"TIN export: one PLY per window in {tin_export_dir}"
+            + (f", triangle edges <= {tin_max_edge:g} m" if tin_max_edge > 0 else "")
+        )
     configure_engine_settings(engine_settings)
     changed = engine_settings.changed()
     log(
@@ -2338,6 +2453,12 @@ def run_batch(
                                     if exclusive
                                     else threads * plan.window
                                 ),
+                                (
+                                    str(TIN_EXPORT_DIR)
+                                    if TIN_EXPORT_DIR is not None
+                                    else None
+                                ),
+                                TIN_EXPORT_MAX_EDGE,
                             )
                         except BrokenProcessPool:
                             pool_broken = True

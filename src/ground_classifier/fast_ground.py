@@ -8,6 +8,7 @@ x, y, z are the candidate points of one block, in metres; settings is a `Setting
                    within `ground_band.width` for the other ground points)
     run.low()      True for isolated low points that were kept out of the surface
     run.model()    True for the points the surface is triangulated from
+    run.tin()      the surface's triangles, as indices into x, y, z
 and per block: run.followed, run.turned, run.spikes_removed (points added or taken out by the later steps),
 run.seed_square (side of the starting squares used, in metres) and run.check() (0 when the triangulation is valid).
 
@@ -507,6 +508,21 @@ class GroundRun:
     def model(self):
         """The points the surface is triangulated from."""
         return self._unsort(self._core.surface_mask())
+
+    def tin(self, max_edge=0.0):
+        """The finished surface as triangles: an (m, 3) int32 array of indices into the x, y, z given to GroundRun
+        (counter-clockwise, vertices are `model()` points). The corner points that bound the surface are not part
+        of it. `max_edge` > 0 (metres) also leaves out triangles with an edge longer than that: the surface across
+        a gap is a guess."""
+        core = self._core
+        tri = core.triangle_array()
+        if max_edge > 0 and tri.size:
+            xs, ys = core.x.astype(np.int64)[tri], core.y.astype(np.int64)[tri]
+            longest = np.zeros(len(tri), np.int64)
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                longest = np.maximum(longest, (xs[:, a] - xs[:, b]) ** 2 + (ys[:, a] - ys[:, b]) ** 2)
+            tri = tri[longest <= ptdcore.length_to_steps(max_edge) ** 2]
+        return self.order[tri].astype(np.int32)
 
     def _members_sorted(self):
         """Points in the thin band about the surface, thinned to one per small square: the closest to the surface."""

@@ -744,6 +744,19 @@ class Core:
         """Which points are vertices of the surface. A new bool array of n."""
         return self._ptri == -2
 
+    def triangle_array(self) -> np.ndarray:
+        """The triangles of the surface, as vertex indices (counter-clockwise).
+
+        Triangles taken out when spikes were removed, and the ones that use the four corner vertices (indices
+        n .. n + 3, which only bound the surface), are left out.
+
+        Returns
+        -------
+        int32 array of shape (m, 3)
+            A new array. Indices are into the arrays the core was built from."""
+        tv = self._tv[: 3 * self.triangles].reshape(-1, 3)
+        return tv[((tv >= 0) & (tv < self._n)).all(axis=1)]
+
     def members(self, up: float, down: float, max_edge: float) -> tuple[int, np.ndarray]:
         """The candidates in a thin band about the surface, the surface vertices excepted.
 

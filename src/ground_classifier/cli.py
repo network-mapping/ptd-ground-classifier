@@ -43,11 +43,20 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
                         help="RAM budget in GB for files processed together; 0 = performance_config.json, then automatic.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Reprocess outputs that already exist from this version.")
+    parser.add_argument("--export-tin", type=Path, default=None, metavar="DIR",
+                        help="Also write each window's ground TIN as a binary PLY mesh (doubles, in the input's own unit) to DIR, "
+                             "for example to open in CloudCompare. Outputs that are reused are not reprocessed: add --overwrite.")
+    parser.add_argument("--tin-max-edge", type=float, default=0.0, metavar="M",
+                        help="With --export-tin: leave out triangles with an edge longer than M metres (0 = keep all).")
     parser.add_argument("--version", action="version",
                         version=f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION})")
     args = parser.parse_args(argv)
     if args.workers < 0 or args.ram_limit_gb < 0:
         parser.error("--workers and --ram-limit-gb must be zero or greater.")
+    if args.tin_max_edge < 0:
+        parser.error("--tin-max-edge must be zero or greater.")
+    if args.tin_max_edge and args.export_tin is None:
+        parser.error("--tin-max-edge needs --export-tin.")
     return args
 
 
@@ -105,6 +114,8 @@ def classify(args: argparse.Namespace) -> int:
         "units_option": args.units,
         "workers_option": args.workers,
         "ram_limit_gb_option": args.ram_limit_gb,
+        "export_tin": str(args.export_tin.resolve()) if args.export_tin else None,
+        "tin_max_edge": args.tin_max_edge,
     }
     effective: dict = {
         "units": units_setting,
@@ -125,6 +136,8 @@ def classify(args: argparse.Namespace) -> int:
             results, failures, resources = run_batch(
                 tasks, inputs, scale_by_path, config.hag_bands, config.engine_settings,
                 requested_workers, requested_ram_gb,
+                args.export_tin.resolve() if args.export_tin else None,
+                args.tin_max_edge,
             )
             effective["resources_used"] = resources
             for input_path, output_path in tasks:
