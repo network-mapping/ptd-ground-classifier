@@ -21,6 +21,7 @@ UNITS_CONFIG_FILENAME = "units_config.json"
 PERFORMANCE_CONFIG_FILENAME = "performance_config.json"
 ENGINE_CONFIG_FILENAME = "engine_config.json"
 HAG_CONFIG_FILENAME = "hag_config.json"
+DTM_CONFIG_FILENAME = "dtm_config.json"
 
 DEFAULT_LOW_VEG_MAX = 0.50
 DEFAULT_MEDIUM_VEG_MAX = 3.00
@@ -51,6 +52,7 @@ class RunConfig:
     units: str                                  # "auto", "usft" or "metres"
     workers: int                                # 0 = automatic
     ram_limit_gb: float                         # 0 = automatic
+    dtm_cell: float                             # DTM cell size in the input unit; 0 = 1 m, or 3 ft
     hag_bands: tuple[float, float, float]       # metres
     engine_values: dict                         # engine_config.json, as the user wrote it
     engine_settings: fast_ground.Settings       # the same, as the engine's settings
@@ -64,6 +66,7 @@ class RunConfig:
             "units": self.units,
             "workers": self.workers,
             "ram_limit_gb": self.ram_limit_gb,
+            "dtm_cell_size": self.dtm_cell,
             "hag_bands_m": {
                 "low_veg_max": low,
                 "medium_veg_max": medium,
@@ -163,6 +166,9 @@ def load_run_config(config_dir: Path) -> RunConfig:
     workers = int(_number(perf, "workers", 0))
     ram_limit_gb = _number(perf, "ram_limit_gb", 0.0)
 
+    dtm = _read_json(config_dir, DTM_CONFIG_FILENAME, files_read)
+    dtm_cell = _number(dtm, "cell_size", 0.0)
+
     hag = _read_json(config_dir, HAG_CONFIG_FILENAME, files_read)
     low = _number(hag, "low_veg_max", DEFAULT_LOW_VEG_MAX)
     medium = _number(hag, "medium_veg_max", DEFAULT_MEDIUM_VEG_MAX)
@@ -181,6 +187,7 @@ def load_run_config(config_dir: Path) -> RunConfig:
         units=units,
         workers=workers,
         ram_limit_gb=ram_limit_gb,
+        dtm_cell=dtm_cell,
         hag_bands=(low, medium, high),
         engine_values=engine_values,
         engine_settings=engine_settings,

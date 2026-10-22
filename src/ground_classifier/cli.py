@@ -48,11 +48,20 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
                              "for example to open in CloudCompare. Outputs that are reused are not reprocessed: add --overwrite.")
     parser.add_argument("--tin-max-edge", type=float, default=0.0, metavar="M",
                         help="With --export-tin: leave out triangles with an edge longer than M metres (0 = keep all).")
+    parser.add_argument("--export-dtm", type=Path, default=None, metavar="DIR",
+                        help="Also write each window's ground raster (the lowest class 2 point of each cell, nodata where there is none) "
+                             "as a GeoTIFF to DIR, in the input's own unit. Add --overwrite for outputs that already exist.")
+    parser.add_argument("--dtm-cell", type=float, default=0.0, metavar="SIZE",
+                        help="With --export-dtm: cell size in the input's unit; 0 = dtm_config.json, then 1 m or 3 ft.")
     parser.add_argument("--version", action="version",
                         version=f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION})")
     args = parser.parse_args(argv)
     if args.workers < 0 or args.ram_limit_gb < 0:
         parser.error("--workers and --ram-limit-gb must be zero or greater.")
+    if args.dtm_cell < 0:
+        parser.error("--dtm-cell must be zero or greater.")
+    if args.dtm_cell and args.export_dtm is None:
+        parser.error("--dtm-cell needs --export-dtm.")
     if args.tin_max_edge < 0:
         parser.error("--tin-max-edge must be zero or greater.")
     if args.tin_max_edge and args.export_tin is None:
@@ -116,6 +125,8 @@ def classify(args: argparse.Namespace) -> int:
         "ram_limit_gb_option": args.ram_limit_gb,
         "export_tin": str(args.export_tin.resolve()) if args.export_tin else None,
         "tin_max_edge": args.tin_max_edge,
+        "export_dtm": str(args.export_dtm.resolve()) if args.export_dtm else None,
+        "dtm_cell_option": args.dtm_cell,
     }
     effective: dict = {
         "units": units_setting,
@@ -138,6 +149,8 @@ def classify(args: argparse.Namespace) -> int:
                 requested_workers, requested_ram_gb,
                 args.export_tin.resolve() if args.export_tin else None,
                 args.tin_max_edge,
+                args.export_dtm.resolve() if args.export_dtm else None,
+                args.dtm_cell or config.dtm_cell,
             )
             effective["resources_used"] = resources
             for input_path, output_path in tasks:

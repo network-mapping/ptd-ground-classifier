@@ -7,9 +7,9 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
-| `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json` |
+| `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json`, `dtm_config.json` |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
 | `scripts/windows/` | `setup.bat`, `run.bat`, `test.bat` |
 | `docs/` | `engine.md`, `reference/` (the paper and notes) |
@@ -33,6 +33,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make regression` | The whole tool on a real tile: has the output changed? Use it while refactoring. |
 | `make memory` | The engine's memory use on the four clips: has it grown? Use it while refactoring. |
 | `make tin` | The TIN export: PLY writer, `GroundRun.tin()`, per-window meshes, command line. |
+| `make dtm` | The DTM export: raster module, per-window rasters, command line. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
 All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
@@ -123,6 +124,20 @@ the window whose core holds its centroid, so the meshes of a tile's windows are 
 leaves out triangles with an edge longer than M metres (guesses across gaps). Outputs that already exist are skipped, so add
 `--overwrite` to export for them. In code: `GroundRun.tin()` gives the triangles, `ground_classifier.ply` writes and reads them.
 `tests/test_tin_export.py` checks it (`make tin`).
+
+## Exporting a ground raster (DTM)
+
+    .venv/bin/ground-classify <inputs> --export-dtm dtm [--dtm-cell 3] --overwrite
+
+writes `dtm/<tile>_w<NN>.tif` per window: a float32 GeoTIFF (deflate-compressed, north up, no coordinate system) in the
+input file's own unit. Each cell holds the **lowest final class 2 point** in it; a cell with no ground point is nodata
+(-9999), nothing is interpolated. The grid is fixed to the coordinates (cell *(i, j)* covers *[i·cell, (i+1)·cell)* in x
+and y), so rasters of different windows, tiles or runs line up cell for cell and can be subtracted directly, and the
+rasters of a tile's windows tile the tile with no overlap: a cell belongs to the window whose core holds its centre.
+The cell size is in the input unit: `cell_size` in `config/dtm_config.json` or `--dtm-cell`, default 1 m (metric input) or
+3 ft (feet input). Like the TIN export it needs `--overwrite` for outputs that already exist.
+In code: `dtm.lowest_ground()` makes the grid, `dtm.write_dtm()` / `dtm.read_dtm()` write and read it.
+`tests/test_dtm.py` checks it (`make dtm`).
 
 ## Compare
 

@@ -11,6 +11,7 @@ dependencies = [
     "laspy[lazrs]>=2.5",
     "numpy>=1.24",
     "scipy>=1.10",
+    "tifffile>=2023.1",
 ]
 
 [project.scripts]

@@ -62,7 +62,7 @@ except ImportError as exc:
         "Install dependencies with: pip install -r requirements.txt"
     ) from exc
 
-from . import __version__, fast_ground, ply
+from . import __version__, dtm, fast_ground, ply
 from ._log import _LOG_STATE, log
 from .config import (
     DEFAULT_HIGH_VEG_MAX,
@@ -113,6 +113,35 @@ def configure_tin_export(directory: Path | None, max_edge: float = 0.0) -> None:
     global TIN_EXPORT_DIR, TIN_EXPORT_MAX_EDGE
     TIN_EXPORT_DIR = directory
     TIN_EXPORT_MAX_EDGE = max_edge
+
+
+# Optional export of each window's ground raster (see export_window_dtm()).
+# Set per process like the TIN export. The cell size is in the input unit;
+# 0 = the default for the file's unit (see default_dtm_cell()).
+DTM_EXPORT_DIR: Path | None = None
+DTM_CELL = 0.0
+
+
+def configure_dtm_export(directory: Path | None, cell: float = 0.0) -> None:
+    global DTM_EXPORT_DIR, DTM_CELL
+    DTM_EXPORT_DIR = directory
+    DTM_CELL = cell
+
+
+def default_dtm_cell(unit_scale: float) -> float:
+    """1 m for a metric file, 3 ft for a feet file (in the file's own unit)."""
+    return 1.0 if abs(unit_scale - 1.0) < 1.0e-9 else 3.0
+
+
+@dataclass(frozen=True)
+class DtmExport:
+    """Where and how one file's window rasters are written."""
+
+    directory: Path
+    stem: str               # file name (without extension) of the input
+    unit_scale: float       # metres per input unit: rasters are written in the input's own unit
+    cell: float             # cell size in the input unit
+    extent: tuple[float, float, float, float]  # the file's windows together, in metres
 
 
 @dataclass(frozen=True)
@@ -795,6 +824,58 @@ def export_window_tin(
     return path
 
 
+def export_window_dtm(
+    export: DtmExport,
+    window_number: int,
+    core: tuple[float, float, float, float],
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    ground: np.ndarray,
+) -> Path | None:
+    """Write the ground raster of a window's core: the lowest ground point
+    (final class 2) of each cell, nodata where a cell has none.
+
+    x, y, z are the window's points in metres and ground flags the class 2
+    ones. The raster is written in the input's own unit on a grid fixed to
+    the coordinates (see dtm.py). A cell belongs to the window whose core
+    holds its centre, so windows write no cell twice; the cell's points
+    come from the whole buffered window. Returns the path, or None if the
+    core has no ground point.
+    """
+    scale = export.unit_scale
+    # Back to the file's unit. Rounding removes the error of the round trip
+    # through metres, which could put a point on a cell edge in the next cell.
+    gx, gy, gz = (np.round(v[ground] / scale, 6) for v in (x, y, z))
+    xmin, ymin, xmax, ymax = export.extent
+    cxmin, cymin, cxmax, cymax = core
+    cells = dtm.owned_cells(
+        tuple(c / scale for c in core),
+        export.cell,
+        first_x=cxmin <= xmin,
+        first_y=cymin <= ymin,
+        last_x=cxmax >= xmax,
+        last_y=cymax >= ymax,
+    )
+    grid = dtm.lowest_ground(gx, gy, gz, export.cell, cells)
+    if not (grid != dtm.NODATA).any():
+        return None
+    export.directory.mkdir(parents=True, exist_ok=True)
+    path = export.directory / f"{export.stem}_w{window_number:02d}.tif"
+    dtm.write_dtm(
+        path,
+        grid,
+        cells,
+        export.cell,
+        "metres" if abs(scale - 1.0) < 1.0e-9 else "usft",
+        (
+            f"ground-classifier {__version__} DTM of {export.stem}, window {window_number}",
+            "lowest class 2 point of each cell; cells owned by this window's core",
+        ),
+    )
+    return path
+
+
 def classify_window_job(
     window_number: int,
     window_count: int,
@@ -808,6 +889,7 @@ def classify_window_job(
     overall_ymax: float,
     allow_sparse_fallback: bool = False,
     tin_export: TinExport | None = None,
+    dtm_export: DtmExport | None = None,
 ) -> WindowResult:
     """Classify one window and return only its non-overlapping core."""
     messages: list[str] = []
@@ -875,6 +957,15 @@ def classify_window_job(
                 tuple(messages),
             )
         log(f"      Final TIN model points: {model.size:,}")
+        if dtm_export is not None:
+            dtm_path = export_window_dtm(
+                dtm_export, window_number, core,
+                local_x, local_y, local_z, local_class == 2,
+            )
+            log(
+                f"      DTM written: {dtm_path}"
+                if dtm_path else "      DTM: no ground points in this core"
+            )
         if tin_export is not None:
             tin_path = export_window_tin(
                 tin_export, window_number, core, faces[0],
@@ -929,6 +1020,7 @@ def process_file_windows(
     core_maxima: tuple[float, float] | None = None,
     allow_sparse_fallback: bool = False,
     tin_export: TinExport | None = None,
+    dtm_export: DtmExport | None = None,
 ) -> None:
     """Process windows sequentially or with bounded shared-memory workers."""
     window_count = len(windows)
@@ -966,6 +1058,7 @@ def process_file_windows(
                 overall_ymax,
                 allow_sparse_fallback,
                 tin_export,
+                dtm_export,
             )
             apply_window_result(result, classification_out, hag_out)
         return
@@ -1025,6 +1118,7 @@ def process_file_windows(
                 overall_ymax,
                 allow_sparse_fallback,
                 tin_export,
+                dtm_export,
             )
             pending[future] = estimate
             in_flight_memory += estimate
@@ -1183,6 +1277,22 @@ def classify_file(
         if TIN_EXPORT_DIR is not None
         else None
     )
+    dtm_export = (
+        DtmExport(
+            DTM_EXPORT_DIR,
+            input_path.stem,
+            unit_scale,
+            DTM_CELL or default_dtm_cell(unit_scale),
+            (
+                min(core[0] for _, core in windows),
+                min(core[1] for _, core in windows),
+                max(core[2] for _, core in windows),
+                max(core[3] for _, core in windows),
+            ),
+        )
+        if DTM_EXPORT_DIR is not None
+        else None
+    )
     processing_started = time.perf_counter()
     process_file_windows(
         windows,
@@ -1197,6 +1307,7 @@ def classify_file(
         (target_bounds[2] * unit_scale, target_bounds[3] * unit_scale),
         target_point_count <= SPARSE_FALLBACK_MAX_BUFFERED_POINTS,
         tin_export,
+        dtm_export,
     )
     if PERFORMANCE_STAGE_TIMINGS:
         log(
@@ -2026,6 +2137,8 @@ def classify_file_worker(
     window_memory_budget: int | None = None,
     tin_export_dir_text: str | None = None,
     tin_max_edge: float = 0.0,
+    dtm_export_dir_text: str | None = None,
+    dtm_cell: float = 0.0,
 ) -> FileResult:
     """Top-level process target; paths avoid transferring point arrays.
 
@@ -2040,6 +2153,10 @@ def classify_file_worker(
     configure_tin_export(
         Path(tin_export_dir_text) if tin_export_dir_text else None,
         tin_max_edge,
+    )
+    configure_dtm_export(
+        Path(dtm_export_dir_text) if dtm_export_dir_text else None,
+        dtm_cell,
     )
     configure_neighbour_halo(unit_scale)
     configure_nominal_tile_size(unit_scale)
@@ -2105,6 +2222,8 @@ def run_batch(
     requested_ram_limit_gb: float,
     tin_export_dir: Path | None = None,
     tin_max_edge: float = 0.0,
+    dtm_export_dir: Path | None = None,
+    dtm_cell: float = 0.0,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
     """Classify ``tasks`` (input, output) with the resource-aware scheduler.
 
@@ -2141,6 +2260,15 @@ def run_batch(
         log(
             f"TIN export: one PLY per window in {tin_export_dir}"
             + (f", triangle edges <= {tin_max_edge:g} m" if tin_max_edge > 0 else "")
+        )
+    configure_dtm_export(dtm_export_dir, dtm_cell)
+    if dtm_export_dir is not None:
+        log(
+            f"DTM export: one GeoTIFF per window in {dtm_export_dir}, cell "
+            + (
+                f"{dtm_cell:g} (input unit)" if dtm_cell > 0
+                else "1 m / 3 ft (default for the file's unit)"
+            )
         )
     configure_engine_settings(engine_settings)
     changed = engine_settings.changed()
@@ -2459,6 +2587,12 @@ def run_batch(
                                     else None
                                 ),
                                 TIN_EXPORT_MAX_EDGE,
+                                (
+                                    str(DTM_EXPORT_DIR)
+                                    if DTM_EXPORT_DIR is not None
+                                    else None
+                                ),
+                                DTM_CELL,
                             )
                         except BrokenProcessPool:
                             pool_broken = True
