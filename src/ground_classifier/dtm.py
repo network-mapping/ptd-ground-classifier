@@ -1,4 +1,4 @@
-"""Ground rasters (DTM): lowest_ground(), write_dtm() and read_dtm().
+"""Ground rasters (DTM): lowest_ground(), write_dtm(), read_dtm() and subtract().
 
 A cell's value is the lowest ground point in it; a cell with no ground point holds `NODATA`. Nothing is interpolated.
 The grid is fixed to the coordinates themselves: cell (i, j) covers x in [i * cell, (i + 1) * cell) and y in
@@ -109,26 +109,67 @@ def write_dtm(path, grid, cells, cell, unit="", comments=()) -> tuple[int, int]:
     return columns, rows
 
 
+def read_dtm_info(path) -> tuple[tuple[int, int, int, int], float, str, list[str]]:
+    """The header of a file written by `write_dtm`, without its raster: (cells, cell, unit, comments).
+
+    Raises ValueError for any other file."""
+    return _read(path, False)[1:]
+
+
 def read_dtm(path) -> tuple[np.ndarray, tuple[int, int, int, int], float, str, list[str]]:
     """Read a file written by `write_dtm`: (grid, cells, cell, unit, comments), the grid with row 0 the lowest y and
     NODATA in the cells without a point.
 
     Raises ValueError for any other file."""
+    return _read(path, True)
+
+
+def _read(path, with_grid):
+    try:
+        return _read_file(path, with_grid)
+    except ValueError as exc:
+        if str(path) in str(exc):
+            raise
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def _read_file(path, with_grid):
     with tifffile.TiffFile(path) as tif:
         page = tif.pages[0]
         description = page.description or ""
         lines = description.split("\n")
         if lines[0] != "ground-classifier DTM":
-            raise ValueError("not a file written by write_dtm")
+            raise ValueError(f"{path}: not a file written by write_dtm")
         values = {k: v for k, _, v in (line.partition(" ") for line in lines[1:] if not line.startswith("comment "))}
         cell = float(values["cell"])
         scale = page.tags[_PIXEL_SCALE].value
         tie = page.tags[_TIEPOINT].value
         if not math.isclose(scale[0], cell) or not math.isclose(scale[1], cell):
-            raise ValueError("pixel size and cell size disagree")
-        grid = page.asarray()[::-1].copy()
-    rows, columns = grid.shape
+            raise ValueError(f"{path}: pixel size and cell size disagree")
+        rows, columns = page.shape
+        grid = page.asarray()[::-1].copy() if with_grid else None
     i0 = round(tie[3] / cell)
     j1 = round(tie[4] / cell) - 1
     comments = [line[len("comment "):] for line in lines[1:] if line.startswith("comment ")]
     return grid, (i0, i0 + columns - 1, j1 - rows + 1, j1), cell, values.get("unit", ""), comments
+
+
+def subtract(a, a_cells, b, b_cells) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """The difference b - a of two rasters on the same grid (same cell size), as (grid, cells).
+
+    The result covers the cells of both rasters together. A cell holds the difference where both have a value and
+    NODATA where either has none (or lies outside it). Because the grid is fixed to the coordinates, the rasters need
+    not cover the same area and nothing is resampled."""
+    cells = (min(a_cells[0], b_cells[0]), max(a_cells[1], b_cells[1]),
+             min(a_cells[2], b_cells[2]), max(a_cells[3], b_cells[3]))
+    shape = (cells[3] - cells[2] + 1, cells[1] - cells[0] + 1)
+
+    def place(grid, g_cells):
+        full = np.full(shape, NODATA, np.float64)
+        j, i = g_cells[2] - cells[2], g_cells[0] - cells[0]
+        full[j:j + grid.shape[0], i:i + grid.shape[1]] = grid
+        return full
+
+    a_full, b_full = place(a, a_cells), place(b, b_cells)
+    both = (a_full != NODATA) & (b_full != NODATA)
+    return np.where(both, b_full - a_full, NODATA).astype(np.float32), cells

@@ -7,7 +7,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json`, `dtm_config.json` |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
@@ -34,6 +34,8 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make memory` | The engine's memory use on the four clips: has it grown? Use it while refactoring. |
 | `make tin` | The TIN export: PLY writer, `GroundRun.tin()`, per-window meshes, command line. |
 | `make dtm` | The DTM export: raster module, per-window rasters, command line. |
+| `make dtmdiff` | The DTM subtraction: `dtm.subtract()` and `ground-classify dtm-diff`. |
+| `make anchor` | The temporary `--anchor-seeds` option: fixed-grid starting squares. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
 All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
@@ -113,6 +115,16 @@ settings, and per file the unit, status, point count and class counts. Each outp
 `ground-classifier <version>` in its LAS header `generating_software`, and existing outputs are reused only when that matches
 the current version (`--overwrite` forces a rerun).
 
+## Anchored seeds (temporary option)
+
+`--anchor-seeds` (setting `seeds.anchor`, off by default) counts the engine's integer coordinates from a fixed grid instead
+of from the block's lower-left corner: the origin is the multiple of the starting square (`max_building_size`, 60 m) at or
+below the corner, and each point's steps are rounded from its own coordinate. The low-point squares and the starting squares
+are cut from those steps, so on the same ground they are the same in every block, whatever window or tile edge the block
+starts at. It makes the starting points window-independent; it does not make the surface identical, because the
+progressive TIN still depends on the data around it (and on the block's far edges). It exists so runs can be compared with
+and without it (`--export-tin`, `--export-dtm`); once settled it is meant to become the only behaviour. `tests/test_seed_anchor.py`.
+
 ## Exporting the TIN
 
     .venv/bin/ground-classify <inputs> --export-tin tins [--tin-max-edge 5] --overwrite
@@ -138,6 +150,19 @@ The cell size is in the input unit: `cell_size` in `config/dtm_config.json` or `
 3 ft (feet input). Like the TIN export it needs `--overwrite` for outputs that already exist.
 In code: `dtm.lowest_ground()` makes the grid, `dtm.write_dtm()` / `dtm.read_dtm()` write and read it.
 `tests/test_dtm.py` checks it (`make dtm`).
+
+### Subtracting rasters
+
+    .venv/bin/ground-classify dtm-diff dtm_before dtm_after dtm_diff
+
+subtracts the rasters of two folders and writes the result to a new folder (`dtm_diff`, which may not be either input): for
+every file, same name, `height = after - before` (positive where the second folder is higher; swap the folders for the
+other sign). The folders must hold files of exactly the same names, on the same cell size and in the same unit, or it stops
+with an error naming every problem before writing anything. The two rasters of a pair need not cover the same area (the grid
+is fixed to the coordinates): the result covers both, and a cell has a value only where both have one. It prints, per file,
+the cells compared and the mean, RMS, 95th percentile and largest difference in the rasters' unit. Folders of rasters from
+runs with different window layouts have different file names, so compare runs with the same layout, or merge first.
+`tests/test_dtm_diff.py` checks it (`make dtmdiff`).
 
 ## Compare
 

@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 PY     := $(VENV)/bin/python
 
-.PHONY: venv build test regression memory tin dtm validate clean
+.PHONY: venv build test regression memory tin dtm dtmdiff anchor validate clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -26,6 +26,12 @@ tin: build
 
 dtm: build
 	$(PY) tests/test_dtm.py
+
+dtmdiff: build
+	$(PY) tests/test_dtm_diff.py
+
+anchor: build
+	$(PY) tests/test_seed_anchor.py
 
 validate: build
 	$(PY) tests/validation/validate_suite.py

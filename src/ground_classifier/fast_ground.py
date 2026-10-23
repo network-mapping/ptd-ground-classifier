@@ -47,6 +47,7 @@ class Seeds:
     square_min: float = 15.0            # m: ... but never below this
     slope_half: float = 10.0            # deg: where the starting points show ground this steep, the starting square is halved ...
     slope_quarter: float = 20.0         # deg: ... and this steep, quartered (large flat roofs are not found on hillsides)
+    anchor: bool = False                # TEMPORARY, for comparing runs: cut the squares from a fixed grid, not from the block's corner
 
     def __post_init__(self):
         if self.max_building_size <= 0:
@@ -388,9 +389,16 @@ class GroundRun:
         self.n = n
         # The core takes horizontal coordinates only as integer steps (ptdcore.COORDINATE_SCALE), counted here from
         # the block's lower-left corner; x and y must be in metres.
-        x0, y0 = float(x.min()), float(y.min())
-        xi = ptdcore.metres_to_steps(x, x0)
-        yi = ptdcore.metres_to_steps(y, y0)
+        #
+        # With `seeds.anchor` they are counted instead from the nearest multiple of the starting square below that
+        # corner (see `_anchored_steps`): the low-point squares and the starting squares are cut from the steps, so
+        # they then fall on the same ground whichever block a point is in.
+        self.origin = None
+        if p.seeds.anchor:
+            xi, yi, self.origin = self._anchored_steps(x, y, p)
+        else:
+            xi = ptdcore.metres_to_steps(x, float(x.min()))
+            yi = ptdcore.metres_to_steps(y, float(y.min()))
         xmax, ymax = int(xi.max()), int(yi.max())
         margin = ptdcore.length_to_steps(min(max(p.seeds.max_building_size, 30.0), 100.0))
         if max(xmax, ymax) + 2 * margin >= 2 ** 28:
@@ -411,6 +419,22 @@ class GroundRun:
         self.rounds = 0
         self.followed = 0
         self.restored = 0
+
+    @staticmethod
+    def _anchored_steps(x, y, p):
+        """Integer steps of x and y counted from a fixed grid: (xi, yi, (origin_x, origin_y)), the origin in steps
+        of the scale counted from the metre coordinate 0.
+
+        The origin is the multiple of the starting square (`seeds.max_building_size`, in whole low-point squares, as
+        `choose_seeds` takes it) at or below the block's corner. A point's steps are rounded from its own
+        coordinate, never from a block-dependent origin, so they too are the same in every block; and every square
+        that `isolated_low_points` and `choose_seeds` cut (the squares inside a starting square are counted from its
+        corner) lies on the same ground in every block that holds it."""
+        cell = max(1, ptdcore.length_to_steps(p.low_points.cell))
+        square = max(1, int(round(p.seeds.max_building_size / p.low_points.cell))) * cell
+        gx, gy = ptdcore.metres_to_steps(x), ptdcore.metres_to_steps(y)
+        ox, oy = int(gx.min()) // square * square, int(gy.min()) // square * square
+        return gx - ox, gy - oy, (ox, oy)
 
     def run(self):
         if self._core is not None:          # already run

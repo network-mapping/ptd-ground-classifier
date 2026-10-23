@@ -1,7 +1,8 @@
-"""Command line: ground-classify <inputs> [options] | ground-classify compare <A> <B> [ref]."""
+"""Command line: ground-classify <inputs> [options] | ground-classify compare <A> <B> [ref] | ground-classify dtm-diff <A> <B> <out>."""
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import sys
 import time
 from pathlib import Path
@@ -25,7 +26,8 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
         prog="ground-classify",
         description=(
             "Ground classification of LAS/LAZ tiles. "
-            "'ground-classify compare <A> <B> [reference]' compares two outputs."
+            "'ground-classify compare <A> <B> [reference]' compares two outputs; "
+            "'ground-classify dtm-diff <A> <B> <output>' subtracts the DTM rasters of two folders."
         ),
     )
     parser.add_argument("inputs", nargs="+", type=Path, help="LAS/LAZ files or folders of them.")
@@ -53,6 +55,9 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
                              "as a GeoTIFF to DIR, in the input's own unit. Add --overwrite for outputs that already exist.")
     parser.add_argument("--dtm-cell", type=float, default=0.0, metavar="SIZE",
                         help="With --export-dtm: cell size in the input's unit; 0 = dtm_config.json, then 1 m or 3 ft.")
+    parser.add_argument("--anchor-seeds", action="store_true",
+                        help="TEMPORARY, for comparing runs: cut the starting squares from a fixed grid, so that the surface "
+                             "does not depend on where a window starts.")
     parser.add_argument("--version", action="version",
                         version=f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION})")
     args = parser.parse_args(argv)
@@ -113,6 +118,9 @@ def classify(args: argparse.Namespace) -> int:
         else:
             tasks.append((input_path, output_path))
 
+    if args.anchor_seeds:
+        settings = config.engine_settings
+        config = replace(config, engine_settings=replace(settings, seeds=replace(settings.seeds, anchor=True)))
     units_setting = args.units or config.units
     requested_workers = args.workers or config.workers
     requested_ram_gb = args.ram_limit_gb or config.ram_limit_gb
@@ -125,6 +133,7 @@ def classify(args: argparse.Namespace) -> int:
         "ram_limit_gb_option": args.ram_limit_gb,
         "export_tin": str(args.export_tin.resolve()) if args.export_tin else None,
         "tin_max_edge": args.tin_max_edge,
+        "anchor_seeds": args.anchor_seeds,
         "export_dtm": str(args.export_dtm.resolve()) if args.export_dtm else None,
         "dtm_cell_option": args.dtm_cell,
     }
@@ -198,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "compare":
         from . import compare
         return compare.main(argv[1:])
+    if argv and argv[0] == "dtm-diff":
+        from . import dtm_diff
+        return dtm_diff.main(argv[1:])
     return classify(parse_arguments(argv))
 
 
