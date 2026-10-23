@@ -4,7 +4,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from ._log import log
+from .utils.loggers import log
 
 # Exact US survey foot definition. This script NEVER rewrites LAS XYZ; the
 # factor is used only for temporary in-memory normalization and native spatial
@@ -161,6 +161,6 @@ def resolve_input_unit_scale(path: Path, units_setting: str) -> float:
     raise SystemExit(
         f"Cannot determine the input unit for {path.name}: {description}.\n"
         "Guessing wrong silently corrupts every coordinate by ~3.28x. "
-        "Pass --units usft or --units metres, or set \"units\" in "
-        "units_config.json, then run again."
+        "Pass --units usft or --units metres, or set \"units\" in the "
+        "config file's input section, then run again."
     )

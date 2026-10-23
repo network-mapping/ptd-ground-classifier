@@ -1,6 +1,0 @@
-{
-  "_comment": "Vegetation height (HAG) bands in metres. low_veg_max: class 3 ceiling. medium_veg_max: class 4 ceiling (also class 5 floor). high_veg_max: class 5 ceiling; HAG above this becomes class 7 (noise/outlier). Edit and save; picked up on the next run.",
-  "low_veg_max": 0.609,
-  "medium_veg_max": 3.048,
-  "high_veg_max": 656.0
-}

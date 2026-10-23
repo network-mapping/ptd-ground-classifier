@@ -14,9 +14,13 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .utils.params import Config
 
 MANIFEST_NAME = "manifest.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -102,6 +106,23 @@ def write_manifest(output_dir: Path, manifest: dict) -> Path:
     return path
 
 
+def _cli_parameters(config: Config) -> dict:
+    locations, options = config.path, config.options
+    return {
+        "inputs": [str(p) for p in locations.inputs],
+        "output_dir": str(locations.output),
+        "overwrite": options.overwrite,
+        "units_option": options.units,
+        "workers_option": options.workers,
+        "ram_limit_gb_option": options.ram_limit_gb,
+        "export_tin": str(locations.export_tin) if locations.export_tin else None,
+        "tin_max_edge": options.tin_max_edge,
+        "anchor_seeds": options.anchor_seeds,
+        "export_dtm": str(locations.export_dtm) if locations.export_dtm else None,
+        "dtm_cell_option": options.dtm_cell,
+    }
+
+
 def build_manifest(
     *,
     started: str,
@@ -109,10 +130,17 @@ def build_manifest(
     duration_s: float,
     status: str,
     error: str | None,
-    cli: dict,
-    config: dict,
+    config: Config,
+    resources_used: dict | None,
     files: list[dict],
 ) -> dict:
+    effective: dict = {
+        "units": config.units,
+        "requested_workers": config.workers,
+        "requested_ram_limit_gb": config.ram_limit_gb,
+    }
+    if resources_used is not None:
+        effective["resources_used"] = resources_used
     return {
         "schema_version": SCHEMA_VERSION,
         "software": software_versions(),
@@ -125,6 +153,9 @@ def build_manifest(
             "command": sys.argv,
             **machine_info(),
         },
-        "parameters": {"cli": cli, "config": config},
+        "parameters": {
+            "cli": _cli_parameters(config),
+            "config": {**config.as_dict(), "effective": effective},
+        },
         "files": files,
     }

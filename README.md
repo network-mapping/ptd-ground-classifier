@@ -7,9 +7,9 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `config`, `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `utils` (command line, run configuration, logging: see its README), `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
-| `config/` | `engine_config.json`, `hag_config.json`, `units_config.json`, `performance_config.json`, `dtm_config.json` |
+| `config/` | `ground_classifier_config.yml`: the settings (sections `input`, `performance`, `dtm`, `hag`, `engine`) |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
 | `scripts/windows/` | `setup.bat`, `run.bat`, `test.bat` |
 | `docs/` | `engine.md`, `reference/` (the paper and notes) |
@@ -49,7 +49,7 @@ so the neighbour-tile context is exercised without a 36 MB file. It runs in a co
 
 It checks that the run completes; point counts, coordinates and every other dimension are carried through; the
 classification of every point is identical to the reference; and the manifest agrees with the output. It also fails if the
-configuration (`engine_config.json`, `hag_config.json`, `units_config.json`) or the fixture files differ from those the
+configuration (the `input`, `hag` and `engine` sections of `config/ground_classifier_config.yml`) or the fixture files differ from those the
 reference was made with. On a mismatch it prints how many points differ and which classes they moved between.
 
 The reference records that the output has not changed, not that it is right. Use it for changes that should not alter
@@ -103,8 +103,13 @@ version's `src`), provided that version has the stage methods named above.
     .venv/bin/ground-classify data/LGE_feet/input_from_FLAI --units usft --output-dir output/LGE_feet
 
 Inputs are files or folders. Outputs are written as `<name>_AdaptiveGround.las|laz` into `--output-dir` (default `./output`),
-never into an input folder. `ground-classify --help` lists the options; settings live in `config/`
-(`--config-dir` or `$GROUND_CLASSIFIER_CONFIG` selects another folder).
+never into an input folder. `ground-classify --help` lists the options.
+
+Settings live in one YAML file, found as `--config FILE`, then `$GROUND_CLASSIFIER_CONFIG`, then
+`./ground_classifier_config.yml` or `./config/ground_classifier_config.yml` in the current directory; with none of them the
+built-in defaults apply. `ground-classify init-config [FILE]` writes a file with every setting at its default and its
+documentation as comments, for editing (`--force` overwrites an existing one). Every section and key is optional; an unknown
+one is an error. A command line option, when given, takes priority over the file.
 
 ## Versions and the manifest
 
@@ -146,7 +151,7 @@ input file's own unit. Each cell holds the **lowest final class 2 point** in it;
 (-9999), nothing is interpolated. The grid is fixed to the coordinates (cell *(i, j)* covers *[i·cell, (i+1)·cell)* in x
 and y), so rasters of different windows, tiles or runs line up cell for cell and can be subtracted directly, and the
 rasters of a tile's windows tile the tile with no overlap: a cell belongs to the window whose core holds its centre.
-The cell size is in the input unit: `cell_size` in `config/dtm_config.json` or `--dtm-cell`, default 1 m (metric input) or
+The cell size is in the input unit: `cell_size` in the `dtm` section of the config file or `--dtm-cell`, default 1 m (metric input) or
 3 ft (feet input). Like the TIN export it needs `--overwrite` for outputs that already exist.
 In code: `dtm.lowest_ground()` makes the grid, `dtm.write_dtm()` / `dtm.read_dtm()` write and read it.
 `tests/test_dtm.py` checks it (`make dtm`).

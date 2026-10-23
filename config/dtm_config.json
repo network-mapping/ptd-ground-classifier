@@ -1,4 +1,0 @@
-{
-  "_comment": "Cell size of the DTM rasters written by --export-dtm, in the unit of the input coordinates (feet for a feet project, metres for a metric one). 0 = the default: 1 for metres, 3 for feet. The same option on the command line (--dtm-cell) takes priority over this file. Each cell holds the lowest ground point in it; cells without one are nodata.",
-  "cell_size": 0
-}

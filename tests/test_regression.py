@@ -16,7 +16,7 @@ Fixture (tests/fixtures/fpl_feet, US survey feet):
 
 What is checked, per tile: the run completes; same point count; X, Y, Z and every other dimension carried through;
 generating_software set; classification identical to the reference (on a mismatch: how many points differ and between
-which classes); manifest.json agrees with the output. The configuration files (engine, hag, units) and the fixture
+which classes); manifest.json agrees with the output. The input, hag and engine sections of the config file and the fixture
 tiles must also be the ones the reference was made with, otherwise a difference could not be told from a code change.
 
 Updating the reference, after a deliberate change of behaviour:
@@ -29,7 +29,8 @@ Making a reference from another version of the code (e.g. an earlier commit, bef
 subprocess, so point PYTHONPATH at that version's src folder, with its core built:
     mkdir /tmp/ref && git archive <commit> | tar -x -C /tmp/ref && (cd /tmp/ref && sh native/build.sh)
     PYTHONPATH=/tmp/ref/src python tests/test_regression.py --write-reference --note "commit <commit>"
-The configuration used is always <repo>/config, whichever version of the code runs.
+The configuration used is always <repo>/config/ground_classifier_config.yml, whichever version of the code runs. Code from
+before the single config file (it reads config/*.json and takes --config-dir) cannot be pointed at it.
 
 The current reference was made from commit f6e7655 on macOS arm64.
 """
@@ -44,12 +45,13 @@ from pathlib import Path
 
 import laspy
 import numpy as np
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "fpl_feet"
 REFERENCE = FIXTURE / "expected.npz"
-CONFIG_DIR = ROOT / "config"
-CONFIG_FILES = ("engine_config.json", "hag_config.json", "units_config.json")   # the ones that change results
+CONFIG_FILE = ROOT / "config" / "ground_classifier_config.yml"
+CONFIG_SECTIONS = ("input", "hag", "engine")   # the ones that change results
 OUTPUT_SUFFIX = "_AdaptiveGround"
 
 fails = 0
@@ -70,15 +72,15 @@ def sha256(path):
 
 
 def config_fingerprint():
-    digest = hashlib.sha256()
-    for name in CONFIG_FILES:
-        digest.update((CONFIG_DIR / name).read_bytes())
-    return digest.hexdigest()
+    # Only the sections that change results; comments, performance and dtm settings do not.
+    sections = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    chosen = {name: sections.get(name) for name in CONFIG_SECTIONS}
+    return hashlib.sha256(json.dumps(chosen, sort_keys=True).encode()).hexdigest()
 
 
 def run_cli(output_dir):
     cmd = [sys.executable, "-m", "ground_classifier", str(FIXTURE), "--output-dir", str(output_dir),
-           "--config-dir", str(CONFIG_DIR), "--units", "usft", "--workers", "1", "--overwrite"]
+           "--config", str(CONFIG_FILE), "--units", "usft", "--workers", "1", "--overwrite"]
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
@@ -133,7 +135,7 @@ def main():
         meta = json.loads(str(ref["meta"]))
         print(f"reference: {meta['software']}; {meta['note']}; made on {meta['platform']}", flush=True)
         ok("configuration unchanged since the reference was made", meta["config_sha256"] == config_fingerprint(),
-           "engine_config / hag_config / units_config differ: rewrite the reference if that is intended")
+           "input / hag / engine config differ: rewrite the reference if that is intended")
         ok("fixture tiles unchanged since the reference was made",
            meta["inputs_sha256"] == {p.name: sha256(p) for p in sorted(FIXTURE.glob("*.laz"))})
 

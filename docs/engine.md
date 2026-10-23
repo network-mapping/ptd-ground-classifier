@@ -42,11 +42,11 @@ TerraScan's, not identical.
    the density comes from: the surface itself is built from fewer, more
    reliable points, and the points lying on it are added afterwards.
 8. **Classes.** Ground 2; everything else 3 / 4 / 5 from height above the
-   finished surface with your `config/hag_config.json` bands; above `high_veg_max`
+   finished surface with your `hag` section bands; above `high_veg_max`
    or a confirmed isolated low point 7. Classes other than 2, 3, 4, 5 and
    13 in the input are left alone.
 
-## Settings (`config/engine_config.json`)
+## Settings (`engine` section of `config/ground_classifier_config.yml`)
 
 All in **metres** and degrees, whatever the project unit. The first seven
 carry the names of TerraScan's Ground routine settings.
@@ -87,15 +87,15 @@ Compare two output folders, optionally against TerraScan tiles:
 ## Units and classes
 
 The tool reads each file's CRS metadata to decide between US survey feet and metres and stops if it cannot
-tell. Use `--units usft|metres` (or `config/units_config.json`) for files without CRS metadata; keep
+tell. Use `--units usft|metres` (or `units` in the config file's `input` section) for files without CRS metadata; keep
 feet and metric projects in separate runs. Every threshold is in metres; coordinates on disk are never rewritten.
 
 Input classes 2, 3, 4, 5 and 13 are re-labelled: ground 2; the rest 3 / 4 / 5 by height above ground
-using `config/hag_config.json`; above `high_veg_max` or a confirmed isolated low point 7. Other classes are kept.
-The HAG bands in `config/hag_config.json` are in metres (the shipped values are 2 ft / 10 ft / 2000 ft for feet projects).
+using the `hag` section of the config file; above `high_veg_max` or a confirmed isolated low point 7. Other classes are kept.
+The HAG bands are in metres (the values in `config/ground_classifier_config.yml` are 2 ft / 10 ft / 2000 ft, for feet projects; the built-in defaults are 0.5 / 3 / 200 m).
 
 ## Scheduling
 
 Tiles are processed as one window up to 120 million points; files run side by side within the RAM budget
-(`config/performance_config.json`, `--workers`, `--ram-limit-gb`). Each tile's 10 m neighbour context is read
+(the `performance` section of the config file, `--workers`, `--ram-limit-gb`). Each tile's neighbour context (10 m by default, `neighbour_halo` in the `input` section) is read
 from the other files in the same input folder.

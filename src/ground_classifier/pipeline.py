@@ -63,13 +63,13 @@ except ImportError as exc:
     ) from exc
 
 from . import __version__, dtm, fast_ground, ply
-from ._log import _LOG_STATE, log
-from .config import (
+from .units import METRES_PER_US_SURVEY_FOOT, metres_to_usft
+from .utils.loggers import _LOG_STATE, log
+from .utils.params import (
     DEFAULT_HIGH_VEG_MAX,
     DEFAULT_LOW_VEG_MAX,
     DEFAULT_MEDIUM_VEG_MAX,
 )
-from .units import METRES_PER_US_SURVEY_FOOT, metres_to_usft
 
 # Written into every output header so a file shows which version made it.
 GENERATING_SOFTWARE = f"ground-classifier {__version__}"
@@ -239,20 +239,25 @@ FULL_FILE_BYTES_PER_POINT = 96
 # halo around the target bounds. Temporary halo caches mean each neighbour
 # file is decompressed once per run rather than once for every adjacent tile.
 NEIGHBOUR_HALO = metres_to_usft(10.0)  # 32.808333... USft = 10 m physical.
+NEIGHBOUR_HALO_METRES = 10.0
 # Re-derived per run by configure_neighbour_halo() once the project's real
 # input unit is known (see detect_input_unit_scale) - the fixed feet value
 # above is only the pre-configuration default, kept for any direct caller
 # that never resolves a project unit.
 
 
-def configure_neighbour_halo(metres_per_input_unit: float) -> None:
-    """Set NEIGHBOUR_HALO to 10 metres expressed in the project's real input
-    unit. Must be called once the input unit is known, before any
+def configure_neighbour_halo(
+    metres_per_input_unit: float, halo_metres: float = 10.0
+) -> None:
+    """Set NEIGHBOUR_HALO to `halo_metres` (the config file's
+    input.neighbour_halo, 10 by default) expressed in the project's real
+    input unit. Must be called once the input unit is known, before any
     neighbour-tile discovery or halo-buffered classify_file work runs, and
     re-called at the start of any worker process that does not inherit this
     process's mutated globals (Windows multiprocessing spawn)."""
-    global NEIGHBOUR_HALO
-    NEIGHBOUR_HALO = 10.0 / max(metres_per_input_unit, 1.0e-9)
+    global NEIGHBOUR_HALO, NEIGHBOUR_HALO_METRES
+    NEIGHBOUR_HALO_METRES = float(halo_metres)
+    NEIGHBOUR_HALO = NEIGHBOUR_HALO_METRES / max(metres_per_input_unit, 1.0e-9)
 
 
 # Numeric tile filenames encode a project's standard tile footprint in its
@@ -1201,7 +1206,8 @@ def classify_file(
         log(
             f"Neighbour context: {halo_x_usft.size:,} points from "
             f"{len(neighbour_caches)} adjacent file(s), "
-            f"{NEIGHBOUR_HALO:.3f} native-unit halo (10 m physical)"
+            f"{NEIGHBOUR_HALO:.3f} native-unit halo "
+            f"({NEIGHBOUR_HALO_METRES:g} m physical)"
         )
     else:
         all_x_usft = target_x_usft
@@ -1422,7 +1428,7 @@ def find_neighbour_sources(
     targets: list[InputMetadata],
     candidates: list[InputMetadata],
 ) -> dict[Path, tuple[Path, ...]]:
-    """Find files intersecting each target's 10 m expanded bounds."""
+    """Find files intersecting each target's expanded (by the neighbour halo) bounds."""
     result = {target.path: tuple() for target in targets}
     if NEIGHBOUR_HALO <= 0 or len(candidates) < 2:
         return result
@@ -2139,6 +2145,7 @@ def classify_file_worker(
     tin_max_edge: float = 0.0,
     dtm_export_dir_text: str | None = None,
     dtm_cell: float = 0.0,
+    neighbour_halo_m: float = 10.0,
 ) -> FileResult:
     """Top-level process target; paths avoid transferring point arrays.
 
@@ -2158,7 +2165,7 @@ def classify_file_worker(
         Path(dtm_export_dir_text) if dtm_export_dir_text else None,
         dtm_cell,
     )
-    configure_neighbour_halo(unit_scale)
+    configure_neighbour_halo(unit_scale, neighbour_halo_m)
     configure_nominal_tile_size(unit_scale)
     return classify_file(
         input_path,
@@ -2224,6 +2231,7 @@ def run_batch(
     tin_max_edge: float = 0.0,
     dtm_export_dir: Path | None = None,
     dtm_cell: float = 0.0,
+    neighbour_halo_m: float = 10.0,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
     """Classify ``tasks`` (input, output) with the resource-aware scheduler.
 
@@ -2238,7 +2246,7 @@ def run_batch(
     # files in a run are expected to share the same project/unit; the first
     # task's unit is used for this shared step, and every actual
     # classification still uses its own file's individually resolved unit.
-    configure_neighbour_halo(unit_scale_by_path[tasks[0][0]])
+    configure_neighbour_halo(unit_scale_by_path[tasks[0][0]], neighbour_halo_m)
     configure_nominal_tile_size(unit_scale_by_path[tasks[0][0]])
 
     unit_labels = sorted({
@@ -2249,10 +2257,10 @@ def run_batch(
     low_veg, medium_veg, high_veg = hag_bands
     log(
         f"Unit mode: this run's input is {unit_summary} (resolved per file "
-        "from CRS metadata, units_config.json or --units). Classification geometry is normalized "
+        "from CRS metadata, the config file or --units). Classification geometry is normalized "
         "to metres in memory; LAS XYZ is never rewritten. Output vegetation: "
         f"class 3 <={low_veg:g} m, class 4 {low_veg:g}-{medium_veg:g} m, "
-        f"class 5 >={medium_veg:g} m (see hag_config.json)."
+        f"class 5 >={medium_veg:g} m (see the hag section of the config file)."
     )
 
     configure_tin_export(tin_export_dir, tin_max_edge)
@@ -2278,7 +2286,7 @@ def run_batch(
             ", ".join(f"{k}={v:g}" for k, v in changed.items())
             if changed else "all defaults"
         )
-        + " (see engine_config.json)"
+        + " (see the engine section of the config file)"
     )
     cpu_budget = cpu_worker_budget(requested_workers)
     memory_budget = safe_parallel_memory_budget(requested_ram_limit_gb)
@@ -2424,7 +2432,7 @@ def run_batch(
             )
             for input_path, output_path in task_list:
                 configure_runtime(cpu_budget)
-                configure_neighbour_halo(unit_scale_by_path[input_path])
+                configure_neighbour_halo(unit_scale_by_path[input_path], neighbour_halo_m)
                 configure_nominal_tile_size(unit_scale_by_path[input_path])
                 try:
                     results[input_path] = classify_file(
@@ -2496,7 +2504,7 @@ def run_batch(
                 log(
                     "  RAM is the limit: more would run at once with a "
                     "larger RAM budget. If this machine is dedicated to "
-                    "the run, ram_limit_gb in performance_config.json "
+                    "the run, ram_limit_gb in the performance section of the config file "
                     "raises it (4 GB of free RAM is always kept spare)."
                 )
             # Files whose helper process died outright. One dead helper
@@ -2593,6 +2601,7 @@ def run_batch(
                                     else None
                                 ),
                                 DTM_CELL,
+                                neighbour_halo_m,
                             )
                         except BrokenProcessPool:
                             pool_broken = True
