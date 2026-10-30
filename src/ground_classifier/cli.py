@@ -84,7 +84,7 @@ def classify(config: Config) -> int:
             for input_path, scale in scale_by_path.items():
                 records[input_path]["unit"] = _unit_name(scale)
             results, failures, resources = run_batch(
-                tasks, inputs, scale_by_path, config.hag_config.bands, config.engine_settings,
+                tasks, inputs, scale_by_path, config.hag_config.bands, config.engine_settings, config.feature_codes,
                 requested_workers, requested_ram_gb,
                 locations.export_tin,
                 options.tin_max_edge,

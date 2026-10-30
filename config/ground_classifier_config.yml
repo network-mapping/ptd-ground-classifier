@@ -33,14 +33,13 @@ dtm:
   # one). 0 = the default: 1 for metres, 3 for feet.
   cell_size: 0.0
 
-# Vegetation height above ground (HAG) bands, in metres. Above high_veg_max a point becomes class 7
-# (noise/outlier).
+# Vegetation height above ground (HAG) bands, in metres. Above high_veg_max a point becomes noise.
 hag:
-  # Class 3 ceiling. (These values are 2 ft / 10 ft / 2000 ft, for feet projects.)
+  # Low vegetation ceiling. (These values are 2 ft / 10 ft / 2000 ft, for feet projects.)
   low_veg_max: 0.609
-  # Class 4 ceiling (also class 5 floor).
+  # Medium vegetation ceiling (also high vegetation floor).
   medium_veg_max: 3.048
-  # Class 5 ceiling.
+  # High vegetation ceiling.
   high_veg_max: 656.0
 
 # Fast-engine settings, all in METRES and degrees whatever the project unit. The first seven carry
@@ -64,3 +63,26 @@ engine:
   follow_surface: true
   # Take single points that stand out of the surface back out.
   remove_spikes: true
+
+# The LAS classification codes. input_feature_codes names the codes of the input files.
+# application_feature_codes maps them to the features this tool works with: each feature has the code it
+# writes (code) and the input codes it takes over (input_feature_codes). Every input code listed under a
+# feature is reset and re-labelled; input codes under no feature are left as they are. Required features:
+# unclassified, ground, low_vegetation, medium_vegetation, high_vegetation, noise.
+feature_codes:
+  # Classification codes found in the input files, with their names.
+  input_feature_codes:
+    2: Ground
+    3: Low Vegetation
+    4: Medium Vegetation
+    5: High Vegetation
+    13: Candidate
+  # Feature name -> {code: output code, input_feature_codes: [input codes taken over]}. unclassified holds the
+  # input codes that are re-labelled without being ground or vegetation in the input.
+  application_feature_codes:
+    unclassified: {code: 0, input_feature_codes: [13]}
+    ground: {code: 2, input_feature_codes: [2]}
+    low_vegetation: {code: 3, input_feature_codes: [3]}
+    medium_vegetation: {code: 4, input_feature_codes: [4]}
+    high_vegetation: {code: 5, input_feature_codes: [5]}
+    noise: {code: 7, input_feature_codes: []}

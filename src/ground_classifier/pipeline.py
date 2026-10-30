@@ -1,13 +1,14 @@
 """Batch pipeline: reads LAS/LAZ tiles, classifies them with the compiled
 progressive-TIN core (see fast_ground.py) and writes them back.
 
-Input classes 2, 3, 4, 5 and 13 are reset and re-labelled; every other class is
-kept. HAG = height above the finished ground surface, in metres:
+Input classes that the config's feature_codes section maps to a feature (by default
+2, 3, 4, 5 and 13) are reset and re-labelled; every other class is kept. HAG = height
+above the finished ground surface, in metres. The output codes below are the defaults:
     2  Ground
     3  Low vegetation:    HAG <= low_veg_max
     4  Medium vegetation: low_veg_max < HAG < medium_veg_max
     5  High vegetation:   medium_veg_max <= HAG <= high_veg_max
-    7  Isolated low points, and HAG > high_veg_max
+    7  Noise: isolated low points, and HAG > high_veg_max
 
 Every threshold is in metres. Input X/Y/Z are converted to metres once, in
 memory, in classify_file(), using the file's resolved unit (see units.py); the
@@ -63,12 +64,14 @@ except ImportError as exc:
     ) from exc
 
 from . import __version__, dtm, fast_ground, ply
+from .feature_codes import FeatureCodes
 from .units import METRES_PER_US_SURVEY_FOOT, metres_to_usft
 from .utils.loggers import _LOG_STATE, log
 from .utils.params import (
     DEFAULT_HIGH_VEG_MAX,
     DEFAULT_LOW_VEG_MAX,
     DEFAULT_MEDIUM_VEG_MAX,
+    FeatureCodesParam,
 )
 
 # Written into every output header so a file shows which version made it.
@@ -82,7 +85,7 @@ FAST_ENGINE_SETTINGS = fast_ground.Settings()
 def configure_engine_settings(settings: fast_ground.Settings) -> None:
     global FAST_ENGINE_SETTINGS
     FAST_ENGINE_SETTINGS = settings
-# A point the low-point filter kept out of the surface is labelled noise (7)
+# A point the low-point filter kept out of the surface is labelled noise
 # only if it ends up at least this far below the finished ground (metres).
 FAST_ENGINE_LOW_NOISE_DEPTH = 0.5
 
@@ -101,6 +104,20 @@ def configure_hag_bands(low: float, medium: float, high: float) -> None:
     LOW_VEG_MAX = low
     MEDIUM_VEG_MAX = medium
     HIGH_VEG_MAX = high
+
+# Input -> output class codes. Set per process by configure_feature_codes()
+# because spawned helpers do not inherit them.
+FEATURE_CODES = FeatureCodesParam().feature_codes()
+
+
+def configure_feature_codes(feature_codes: FeatureCodes) -> None:
+    global FEATURE_CODES
+    FEATURE_CODES = feature_codes
+
+
+def application_code(name: str) -> int:
+    """The class code written for the feature `name` (e.g. "ground")."""
+    return FEATURE_CODES("application")[name].code
 
 # Optional export of each window's TIN as a PLY mesh (see export_window_tin()).
 # Set per process by configure_tin_export() because spawned helpers do not
@@ -503,14 +520,11 @@ def format_memory(byte_count: int) -> str:
 
 
 def reset_input_class_mask(classification: np.ndarray) -> np.ndarray:
-    """Return the five-class reset mask without np.isin's setup overhead."""
-    return (
-        (classification == 2)
-        | (classification == 3)
-        | (classification == 4)
-        | (classification == 5)
-        | (classification == 13)
-    )
+    """Return the mask of points in a re-labelled input class, without np.isin's setup overhead."""
+    mask = np.zeros(classification.shape, dtype=bool)
+    for code in FEATURE_CODES.mapped_input_feature_codes:
+        mask |= classification == code
+    return mask
 
 
 # Output-header policy. TerraScan and some upstream workflows may leave a
@@ -544,21 +558,25 @@ def assign_hag_classes(
     remaining: np.ndarray,
     hag: np.ndarray,
 ) -> None:
-    """Assign the three vegetation classes (3/4/5) from final HAG, using
+    """Assign the three vegetation classes from final HAG, using
     the project's configured HAG bands (see config.load_run_config() /
     configure_hag_bands()). HAG is always in metres regardless of the
     input file's own coordinate unit."""
-    classification[remaining & (hag <= LOW_VEG_MAX)] = 3
+    low_code, medium_code, high_code = (
+        application_code(name)
+        for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
+    )
+    classification[remaining & (hag <= LOW_VEG_MAX)] = low_code
     classification[
         remaining
         & (hag > LOW_VEG_MAX)
         & (hag < MEDIUM_VEG_MAX)
-    ] = 4
+    ] = medium_code
     classification[
         remaining
         & (hag >= MEDIUM_VEG_MAX)
         & (hag <= HIGH_VEG_MAX)
-    ] = 5
+    ] = high_code
 
 
 def classify_block(
@@ -571,7 +589,8 @@ def classify_block(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Classify one block with the compiled core.
 
-    The five source classes are reset and re-labelled 2 / 3 / 4 / 5 / 7,
+    The re-labelled input classes (FEATURE_CODES.mapped_input_feature_codes)
+    are reset and labelled ground / low, medium, high vegetation / noise,
     every other class is left alone, and the result is (classification,
     height above ground, ground point indices).
 
@@ -580,6 +599,7 @@ def classify_block(
     its max_edge, in metres).
     """
     classification = initial_classification.copy()
+    unclassified_code = application_code("unclassified")
     source = np.flatnonzero(reset_input_class_mask(classification))
     if source.size < 3:
         raise InsufficientGroundSupport(
@@ -595,13 +615,14 @@ def classify_block(
     height = run.heights()
     low = run.low()
 
-    labels = np.zeros(source.size, dtype=classification.dtype)
-    labels[ground] = 2
+    labels = np.full(source.size, unclassified_code, dtype=classification.dtype)
+    labels[ground] = application_code("ground")
     open_points = ~ground
-    labels[open_points & (height > HIGH_VEG_MAX)] = 7
+    noise_code = application_code("noise")
+    labels[open_points & (height > HIGH_VEG_MAX)] = noise_code
     low_noise = open_points & low & (height < -FAST_ENGINE_LOW_NOISE_DEPTH)
-    labels[low_noise] = 7
-    assign_hag_classes(labels, labels == 0, height)
+    labels[low_noise] = noise_code
+    assign_hag_classes(labels, labels == unclassified_code, height)
     classification[source] = labels
 
     hag = np.full(x.size, np.nan, dtype=np.float32)
@@ -619,7 +640,7 @@ def classify_block(
         f"followed past its edge +{run.followed:,}, corners turned "
         f"+{run.turned:,}, spikes taken out {run.spikes_removed:,}; "
         f"isolated low points kept out: {int(np.count_nonzero(low)):,} "
-        f"({int(np.count_nonzero(low_noise)):,} labelled class 7)"
+        f"({int(np.count_nonzero(low_noise)):,} labelled noise)"
     )
     if run.seed_square < float(FAST_ENGINE_SETTINGS.seeds.max_building_size):
         log(
@@ -839,9 +860,9 @@ def export_window_dtm(
     ground: np.ndarray,
 ) -> Path | None:
     """Write the ground raster of a window's core: the lowest ground point
-    (final class 2) of each cell, nodata where a cell has none.
+    (final ground class) of each cell, nodata where a cell has none.
 
-    x, y, z are the window's points in metres and ground flags the class 2
+    x, y, z are the window's points in metres and ground flags the ground
     ones. The raster is written in the input's own unit on a grid fixed to
     the coordinates (see dtm.py). A cell belongs to the window whose core
     holds its centre, so windows write no cell twice; the cell's points
@@ -875,7 +896,7 @@ def export_window_dtm(
         "metres" if abs(scale - 1.0) < 1.0e-9 else "usft",
         (
             f"ground-classifier {__version__} DTM of {export.stem}, window {window_number}",
-            "lowest class 2 point of each cell; cells owned by this window's core",
+            "lowest ground point of each cell; cells owned by this window's core",
         ),
     )
     return path
@@ -965,7 +986,7 @@ def classify_window_job(
         if dtm_export is not None:
             dtm_path = export_window_dtm(
                 dtm_export, window_number, core,
-                local_x, local_y, local_z, local_class == 2,
+                local_x, local_y, local_z, local_class == application_code("ground"),
             )
             log(
                 f"      DTM written: {dtm_path}"
@@ -1247,7 +1268,7 @@ def classify_file(
 
     classification_out = classification_in.copy()
     reset_global = reset_input_class_mask(classification_out)
-    classification_out[reset_global] = 0
+    classification_out[reset_global] = application_code("unclassified")
     hag_out = np.full(x.size, np.nan, dtype=np.float32)
 
     windows = list(processing_windows(target_x, target_y))
@@ -1352,7 +1373,7 @@ def classify_file(
                 classification_out[:target_point_count] == code
             )
         )
-        for code in (0, 2, 3, 4, 5, 7)
+        for code in FEATURE_CODES.application_codes
     }
     log(
         "Class counts: "
@@ -2138,6 +2159,7 @@ def classify_file_worker(
     neighbour_bounds: tuple[float, float, float, float],
     hag_bands: tuple[float, float, float],
     engine_settings: fast_ground.Settings,
+    feature_codes: FeatureCodes,
     unit_scale: float,
     window_workers: int = 1,
     window_memory_budget: int | None = None,
@@ -2157,6 +2179,7 @@ def classify_file_worker(
     configure_runtime(cpu_slots, f"[{input_path.stem}] ")
     configure_hag_bands(*hag_bands)
     configure_engine_settings(engine_settings)
+    configure_feature_codes(feature_codes)
     configure_tin_export(
         Path(tin_export_dir_text) if tin_export_dir_text else None,
         tin_max_edge,
@@ -2225,6 +2248,7 @@ def run_batch(
     unit_scale_by_path: dict[Path, float],
     hag_bands: tuple[float, float, float],
     engine_settings: fast_ground.Settings,
+    feature_codes: FeatureCodes,
     requested_workers: int,
     requested_ram_limit_gb: float,
     tin_export_dir: Path | None = None,
@@ -2240,6 +2264,7 @@ def run_batch(
     failed, and the CPU/RAM limits the scheduler used.
     """
     configure_hag_bands(*hag_bands)
+    configure_feature_codes(feature_codes)
     # NEIGHBOUR_HALO is a single process-wide value used while discovering
     # which files are spatial neighbours of each other, before any one
     # file's classification begins - it needs one project-wide unit. All
@@ -2255,12 +2280,23 @@ def run_batch(
     })
     unit_summary = " and ".join(unit_labels) if unit_labels else "unknown"
     low_veg, medium_veg, high_veg = hag_bands
+    low_code, medium_code, high_code = (
+        application_code(name)
+        for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
+    )
     log(
         f"Unit mode: this run's input is {unit_summary} (resolved per file "
         "from CRS metadata, the config file or --units). Classification geometry is normalized "
         "to metres in memory; LAS XYZ is never rewritten. Output vegetation: "
-        f"class 3 <={low_veg:g} m, class 4 {low_veg:g}-{medium_veg:g} m, "
-        f"class 5 >={medium_veg:g} m (see the hag section of the config file)."
+        f"class {low_code} <={low_veg:g} m, class {medium_code} {low_veg:g}-{medium_veg:g} m, "
+        f"class {high_code} >={medium_veg:g} m (see the hag section of the config file)."
+    )
+    log(
+        "Classes: input "
+        + ", ".join(str(code) for code in FEATURE_CODES.mapped_input_feature_codes)
+        + " re-labelled as "
+        + ", ".join(f"{name} {application_code(name)}" for name in FEATURE_CODES.application_names)
+        + " (see the feature_codes section of the config file)."
     )
 
     configure_tin_export(tin_export_dir, tin_max_edge)
@@ -2582,6 +2618,7 @@ def run_batch(
                                 metadata_by_path[input_path].neighbour_bounds,
                                 hag_bands,
                                 engine_settings,
+                                feature_codes,
                                 unit_scale_by_path[input_path],
                                 threads,
                                 (

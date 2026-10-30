@@ -5,12 +5,14 @@
 <A> and <B> are folders (or single files) holding the same tiles classified
 two different ways, for example with and without an optional stage. Files
 are matched by name. <reference>, if given, is a folder with the same tiles
-classified by another tool (for example TerraScan); its class 2 is treated
-as the reference ground.
+classified by another tool (for example TerraScan); its ground class is the
+input code(s) of the ground feature in the config's feature_codes section
+and is treated as the reference ground.
 
 For every tile it reports
   * how many points have a different class, and the commonest changes;
-  * the number of ground (class 2) points in each;
+  * the number of ground points in each (the ground output code of the
+    feature_codes section);
   * how far apart the two ground surfaces are: the triangulated surface
     through A's ground points is sampled at B's ground points, and the
     other way round (RMSE, 95th percentile and maximum, in the file's own
@@ -34,6 +36,8 @@ except ImportError as exc:
         f"Missing Python package: {getattr(exc, 'name', exc)}. Run this with "
         "the environment you installed the classifier into (make venv)."
     ) from exc
+
+from .utils.config import load_feature_codes
 
 SUFFIX = "_AdaptiveGround"
 
@@ -88,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     a_files, b_files = collect(Path(argv[0])), collect(Path(argv[1]))
     reference = collect(Path(argv[2])) if len(argv) == 3 else {}
+    feature_codes = load_feature_codes()
+    ground_code = feature_codes("application")["ground"].code
+    reference_ground_codes = feature_codes.get_input_codes("ground")
     common = sorted(set(a_files) & set(b_files))
     if not common:
         raise SystemExit("No tiles with the same name were found in both A and B.")
@@ -108,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             print("    The two files do not hold the same points in the same order; skipped.")
             continue
         changed = ca != cb
-        ga, gb = ca == 2, cb == 2
+        ga, gb = ca == ground_code, cb == ground_code
         total_points += ca.size
         total_changed += int(changed.sum())
         total_a += int(ga.sum())
@@ -142,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             rx, ry, rz = (np.asarray(v, dtype=np.float64) for v in (r.x, r.y, r.z))
             cr = np.asarray(r.classification, dtype=np.int64)
             same_points = cr.size == ca.size and np.array_equal(rx, ax) and np.array_equal(ry, ay)
-            gr = cr == 2
+            gr = np.isin(cr, reference_ground_codes)
             for label, mask, xyz in (("A", ga, (ax, ay, az)), ("B", gb, (bx, by, bz))):
                 if same_points:
                     hit = int(np.sum(mask & gr))

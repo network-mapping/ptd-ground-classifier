@@ -36,7 +36,7 @@ def run_one(mod, path):
     c_terra_core = c_terra[core_mask]
     n = classification.size
 
-    ours_ground = classification == 2
+    ours_ground = classification == mod.application_code("ground")
     terra_ground = c_terra_core == 2
     agree = ours_ground & terra_ground
     fp = ours_ground & ~terra_ground
@@ -89,5 +89,6 @@ if __name__ == "__main__":
     config = load_config(get_args([str(CLIPS_DIR)]))
     pipeline.configure_engine_settings(config.engine_settings)
     pipeline.configure_hag_bands(*config.hag_config.bands)
+    pipeline.configure_feature_codes(config.feature_codes)
     pipeline.configure_runtime(kdtree_workers=1)
     run_suite(pipeline, label="ground_classifier.pipeline")

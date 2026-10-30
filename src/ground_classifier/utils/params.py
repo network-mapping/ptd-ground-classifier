@@ -11,9 +11,10 @@ from __future__ import annotations
 import dataclasses as dc
 import math
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, Callable, ClassVar
 
 from .. import fast_ground
+from ..feature_codes import FeatureCodes
 from .helpers import normalize_path
 
 DEFAULT_LOW_VEG_MAX = 0.50
@@ -32,6 +33,10 @@ def _number(key: str, value, minimum: float = 0.0) -> float:
 
 def _field(default, doc: str):
     return dc.field(default=default, metadata={"doc": doc})
+
+
+def _factory_field(factory: Callable[[], Any], doc: str):
+    return dc.field(default_factory=factory, metadata={"doc": doc})
 
 
 # --- from the command line ---------------------------------------------------------------------------------------
@@ -145,13 +150,12 @@ class DtmParam:
 class HagParam:
     SECTION: ClassVar[str] = "hag"
     DOC: ClassVar[str] = (
-        "Vegetation height above ground (HAG) bands, in metres. Above high_veg_max a point becomes class 7 "
-        "(noise/outlier)."
+        "Vegetation height above ground (HAG) bands, in metres. Above high_veg_max a point becomes noise."
     )
 
-    low_veg_max: float = _field(DEFAULT_LOW_VEG_MAX, "Class 3 ceiling.")
-    medium_veg_max: float = _field(DEFAULT_MEDIUM_VEG_MAX, "Class 4 ceiling (also class 5 floor).")
-    high_veg_max: float = _field(DEFAULT_HIGH_VEG_MAX, "Class 5 ceiling.")
+    low_veg_max: float = _field(DEFAULT_LOW_VEG_MAX, "Low vegetation ceiling.")
+    medium_veg_max: float = _field(DEFAULT_MEDIUM_VEG_MAX, "Medium vegetation ceiling (also high vegetation floor).")
+    high_veg_max: float = _field(DEFAULT_HIGH_VEG_MAX, "High vegetation ceiling.")
 
     def __post_init__(self):
         self.low_veg_max = _number("low_veg_max", self.low_veg_max)
@@ -167,6 +171,83 @@ class HagParam:
     @property
     def bands(self) -> tuple[float, float, float]:
         return self.low_veg_max, self.medium_veg_max, self.high_veg_max
+
+
+# Application features the pipeline writes; each must be defined in `feature_codes.application_feature_codes`.
+#   unclassified      what a re-labelled point is before it gets a class; also the class of its input_feature_codes
+#   ground            the ground surface
+#   low/medium/high_vegetation   the three height-above-ground bands (see HagParam)
+#   noise             points above high_veg_max and confirmed isolated low points
+REQUIRED_FEATURES = ("unclassified", "ground", "low_vegetation", "medium_vegetation", "high_vegetation", "noise")
+
+
+def _default_input_feature_codes() -> dict[int, str]:
+    return {
+        2: "Ground",
+        3: "Low Vegetation",
+        4: "Medium Vegetation",
+        5: "High Vegetation",
+        13: "Candidate",
+    }
+
+
+def _default_application_feature_codes() -> dict[str, dict[str, Any]]:
+    return {
+        "unclassified": {"code": 0, "input_feature_codes": [13]},
+        "ground": {"code": 2, "input_feature_codes": [2]},
+        "low_vegetation": {"code": 3, "input_feature_codes": [3]},
+        "medium_vegetation": {"code": 4, "input_feature_codes": [4]},
+        "high_vegetation": {"code": 5, "input_feature_codes": [5]},
+        "noise": {"code": 7, "input_feature_codes": []},
+    }
+
+
+@dc.dataclass
+class FeatureCodesParam:
+    SECTION: ClassVar[str] = "feature_codes"
+    DOC: ClassVar[str] = (
+        "The LAS classification codes. input_feature_codes names the codes of the input files. "
+        "application_feature_codes maps them to the features this tool works with: each feature has the code it "
+        "writes (code) and the input codes it takes over (input_feature_codes). Every input code listed under a "
+        "feature is reset and re-labelled; input codes under no feature are left as they are. "
+        f"Required features: {', '.join(REQUIRED_FEATURES)}."
+    )
+
+    input_feature_codes: dict[int, str] = _factory_field(
+        _default_input_feature_codes, "Classification codes found in the input files, with their names.")
+    application_feature_codes: dict[str, dict[str, Any]] = _factory_field(
+        _default_application_feature_codes,
+        "Feature name -> {code: output code, input_feature_codes: [input codes taken over]}. unclassified holds the "
+        "input codes that are re-labelled without being ground or vegetation in the input.")
+
+    def __post_init__(self):
+        if not isinstance(self.input_feature_codes, dict) or not all(
+                isinstance(name, str) for name in self.input_feature_codes.values()):
+            raise SystemExit(f"{self.SECTION}.input_feature_codes must map each code to a name")
+        if not isinstance(self.application_feature_codes, dict):
+            raise SystemExit(f"{self.SECTION}.application_feature_codes must map each feature to its settings")
+        features: dict[str, dict[str, Any]] = {}
+        for name, feature in self.application_feature_codes.items():
+            if not isinstance(feature, dict) or set(feature) != {"code", "input_feature_codes"} \
+                    or not isinstance(feature["input_feature_codes"], list):
+                raise SystemExit(
+                    f"{self.SECTION}.application_feature_codes.{name} must be "
+                    "{code: <number>, input_feature_codes: [<numbers>]}")
+            features[str(name)] = {"code": feature["code"], "input_feature_codes": list(feature["input_feature_codes"])}
+        self.input_feature_codes = dict(self.input_feature_codes)
+        self.application_feature_codes = features
+        self.feature_codes()
+
+    def feature_codes(self) -> FeatureCodes:
+        """The `FeatureCodes` these values make."""
+        try:
+            return FeatureCodes(
+                dict(self.input_feature_codes),
+                {name: dict(feature) for name, feature in self.application_feature_codes.items()},
+                required_application_feature_names=list(REQUIRED_FEATURES),
+            )
+        except ValueError as exc:
+            raise SystemExit(f"{self.SECTION}: {exc}") from exc
 
 
 def _setting(group: str, name: str, doc: str = ""):
@@ -251,7 +332,9 @@ class Config:
     dtm_config: DtmParam
     hag_config: HagParam
     engine_config: EngineParam
+    feature_codes_config: FeatureCodesParam
     engine_settings: fast_ground.Settings   # engine_config as the engine's settings (and --anchor-seeds)
+    feature_codes: FeatureCodes             # feature_codes_config as the codes the pipeline works with
 
     # A command line option, when given, takes priority over the config file.
     @property
@@ -285,4 +368,5 @@ class Config:
                 "high_veg_max": high,
             },
             "engine": dc.asdict(self.engine_config),
+            "feature_codes": dc.asdict(self.feature_codes_config),
         }

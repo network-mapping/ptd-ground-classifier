@@ -39,7 +39,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tin-max-edge", type=float, default=0.0, metavar="M",
                         help="With --export-tin: leave out triangles with an edge longer than M metres (0 = keep all).")
     parser.add_argument("--export-dtm", type=Path, default=None, metavar="DIR",
-                        help="Also write each window's ground raster (the lowest class 2 point of each cell, nodata where there is none) "
+                        help="Also write each window's ground raster (the lowest ground point of each cell, nodata where there is none) "
                              "as a GeoTIFF to DIR, in the input's own unit. Add --overwrite for outputs that already exist.")
     parser.add_argument("--dtm-cell", type=float, default=0.0, metavar="SIZE",
                         help="With --export-dtm: cell size in the input's unit; 0 = config file, then 1 m or 3 ft.")

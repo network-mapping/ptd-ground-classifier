@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from . import params as p
+from ..feature_codes import FeatureCodes
 from .helpers import env_default
 from .loggers import log
 
@@ -28,6 +29,7 @@ SECTIONS = {
     "dtm_config": p.DtmParam,
     "hag_config": p.HagParam,
     "engine_config": p.EngineParam,
+    "feature_codes_config": p.FeatureCodesParam,
 }
 
 
@@ -81,8 +83,17 @@ def load_config(args) -> p.Config:
         path=path_param,
         options=option_param,
         engine_settings=engine_settings,
+        feature_codes=sections["feature_codes_config"].feature_codes(),
         **sections,
     )
+
+
+def load_feature_codes(explicit: Path | None = None) -> FeatureCodes:
+    """Only the feature codes of the config file (for commands that take no run arguments)."""
+    path = find_config_file(explicit)
+    data = _read_yaml(path) if path else {}
+    section = p.FeatureCodesParam.SECTION
+    return _from_section(p.FeatureCodesParam, data.get(section), path).feature_codes()
 
 
 def _read_yaml(path: Path) -> dict:
@@ -124,7 +135,12 @@ def default_config_text() -> str:
         for field in dc.fields(cls):
             if field.metadata.get("doc"):
                 lines += _comment(field.metadata["doc"], 2)
-            lines.append(f"  {field.name}: {_scalar(getattr(defaults, field.name))}")
+            value = getattr(defaults, field.name)
+            if isinstance(value, dict):
+                lines.append(f"  {field.name}:")
+                lines += [f"    {_scalar(key)}: {_scalar(item)}" for key, item in value.items()]
+            else:
+                lines.append(f"  {field.name}: {_scalar(value)}")
     return "\n".join(lines) + "\n"
 
 

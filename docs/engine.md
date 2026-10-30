@@ -43,8 +43,8 @@ TerraScan's, not identical.
    reliable points, and the points lying on it are added afterwards.
 8. **Classes.** Ground 2; everything else 3 / 4 / 5 from height above the
    finished surface with your `hag` section bands; above `high_veg_max`
-   or a confirmed isolated low point 7. Classes other than 2, 3, 4, 5 and
-   13 in the input are left alone.
+   or a confirmed isolated low point 7. Input classes the `feature_codes`
+   section does not map (by default all but 2, 3, 4, 5 and 13) are left alone.
 
 ## Settings (`engine` section of `config/ground_classifier_config.yml`)
 
@@ -92,6 +92,9 @@ feet and metric projects in separate runs. Every threshold is in metres; coordin
 
 Input classes 2, 3, 4, 5 and 13 are re-labelled: ground 2; the rest 3 / 4 / 5 by height above ground
 using the `hag` section of the config file; above `high_veg_max` or a confirmed isolated low point 7. Other classes are kept.
+These codes are the defaults of the `feature_codes` section of the config file, which names the input codes and the
+output code of each feature (ground, low / medium / high vegetation, noise, unclassified); change it to classify
+files that use other codes.
 The HAG bands are in metres (the values in `config/ground_classifier_config.yml` are 2 ft / 10 ft / 2000 ft, for feet projects; the built-in defaults are 0.5 / 3 / 200 m).
 
 ## Scheduling
