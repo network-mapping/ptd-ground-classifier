@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ground_classifier import cli, dtm, fast_ground, pipeline
 from ground_classifier.las import LasHeader
+from ground_classifier.tiles import halo_in_input_units, nominal_tile_size
 from ground_classifier.utils.args import get_args
 from ground_classifier.utils.config import default_config_text, load_config
 from ground_classifier.utils.params import (
@@ -103,14 +104,10 @@ def main():
         ok("configure_run: and what the windows and exports read from it is what was set",
            (pipeline.RUN_SETTINGS.block_size, pipeline.RUN_SETTINGS.block_overlap, pipeline.RUN_SETTINGS.tin_export_dir, pipeline.RUN_SETTINGS.dtm_cell)
            == (150.0, 40.0, Path("/tmp/tin"), 6.0))
-        pipeline.configure_input_unit(FEET)
-        ok("configure_input_unit: the halo is in the input unit (25 m of feet), and the nominal tile is 1500 ft",
-           abs(pipeline.NEIGHBOUR_HALO - 25.0 / FEET) < 1e-9 and pipeline.NOMINAL_TILE_SIZE_USFT == 1500.0, f"{pipeline.NEIGHBOUR_HALO:.3f}")
-        pipeline.configure_input_unit(1.0)
-        ok("configure_input_unit: metres: the halo is 25 and the nominal tile 500", pipeline.NEIGHBOUR_HALO == 25.0 and pipeline.NOMINAL_TILE_SIZE_USFT == 500.0)
-        pipeline.configure_run(dataclasses.replace(custom, neighbour_halo_m=0.0))
-        pipeline.configure_input_unit(1.0)
-        ok("configure_input_unit: a halo of 0 stays 0", pipeline.NEIGHBOUR_HALO == 0.0)
+        ok("tiles: the halo is in the input unit (25 m of feet), and the nominal tile is 1500 ft",
+           abs(halo_in_input_units(25.0, FEET) - 25.0 / FEET) < 1e-9 and nominal_tile_size(FEET) == 1500.0, f"{halo_in_input_units(25.0, FEET):.3f}")
+        ok("tiles: metres: the halo is 25 and the nominal tile 500", halo_in_input_units(25.0, 1.0) == 25.0 and nominal_tile_size(1.0) == 500.0)
+        ok("tiles: a halo of 0 stays 0", halo_in_input_units(0.0, 1.0) == 0.0)
 
         # the window layout follows the block size set for the run, not a module constant
         pipeline.configure_run(RunSettings())
@@ -124,7 +121,6 @@ def main():
         ok("windows: the buffer around a core is the block overlap", picked.tolist() == [0, 1, 2], str(picked.tolist()))
     finally:
         pipeline.configure_run(RunSettings())
-        pipeline.configure_input_unit(FEET)
 
     # a run through cli.main. On a machine with little free RAM the scheduler runs the files in this process, so
     # this checks the settings reach the pipeline; the spawned-worker path is checked below.

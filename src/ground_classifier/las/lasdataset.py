@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from glob import glob, has_magic
 from pathlib import Path
 import logging
+import math
 
 import numpy as np
 
@@ -253,6 +254,85 @@ class LasDataset:
             return self._by_path[Path(path).resolve()]
         except KeyError:
             raise KeyError(f'{path} is not in this LAS dataset.') from None
+
+    def neighbours(self, distance, *, targets=None, footprint=None):
+        """The members whose footprint comes within ``distance`` of each target's footprint.
+
+        Args:
+            distance: In the dataset's coordinate unit. Zero or less finds nothing.
+            targets: Members (or their paths) to find the neighbours of; default every source.
+            footprint: ``LasFile -> (xmin, ymin, xmax, ymax)``; default the header extent. Lets a caller
+                stand for a tile by something other than its points, e.g. a nominal tile square.
+
+        Returns:
+            ``{target.path: (neighbour, ...)}``: the other sources (empty ones too, by their footprint), sorted by
+            path, whose footprint touches the target's footprint widened by ``distance`` on every side.
+            A footprint is evaluated once per source.
+
+        Raises:
+            KeyError: a target is not in this dataset.
+
+        Example::
+
+            near = dataset.neighbours(10.0)
+            for lasfile in near[dataset.sources[0].path]:
+                print(lasfile.path.name)
+        """
+        from scipy.spatial import cKDTree
+
+        footprint = footprint or (lambda source: source.header.extent_xy)
+        candidates = self._sources
+        chosen = candidates if targets is None else tuple(
+            target if isinstance(target, LasFile) else self.file(target) for target in targets
+        )
+        result = {target.path: () for target in chosen}
+        if distance <= 0 or len(candidates) < 2:
+            return result
+
+        bounds = {source.path: tuple(footprint(source)) for source in candidates}
+        centers = np.array(
+            [
+                [(bounds[source.path][0] + bounds[source.path][2]) * 0.5,
+                 (bounds[source.path][1] + bounds[source.path][3]) * 0.5]
+                for source in candidates
+            ],
+            dtype=np.float64,
+        )
+        half_diagonal = np.array(
+            [
+                0.5 * math.hypot(
+                    bounds[source.path][2] - bounds[source.path][0],
+                    bounds[source.path][3] - bounds[source.path][1],
+                )
+                for source in candidates
+            ],
+            dtype=np.float64,
+        )
+        tree = cKDTree(centers)
+        largest_half_diagonal = float(np.max(half_diagonal))
+        position_of = {source.path: position for position, source in enumerate(candidates)}
+
+        for target in chosen:
+            target_position = position_of[target.path]
+            search_radius = half_diagonal[target_position] + largest_half_diagonal + distance
+            positions = tree.query_ball_point(centers[target_position], search_radius)
+            txmin, tymin, txmax, tymax = bounds[target.path]
+            expanded = (txmin - distance, tymin - distance, txmax + distance, tymax + distance)
+            neighbours = []
+            for position in positions:
+                candidate = candidates[int(position)]
+                if candidate.path == target.path:
+                    continue
+                xmin, ymin, xmax, ymax = bounds[candidate.path]
+                if (
+                    xmax >= expanded[0]
+                    and xmin <= expanded[2]
+                    and ymax >= expanded[1]
+                    and ymin <= expanded[3]
+                ):
+                    neighbours.append(candidate)
+            result[target.path] = tuple(sorted(neighbours, key=lambda source: str(source.path)))
+        return result
 
     @staticmethod
     def _signature(path):

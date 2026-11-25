@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 PY     := $(VENV)/bin/python
 
-.PHONY: venv build test regression memory tin dtm dtmdiff anchor las settings reclassify validate clean
+.PHONY: venv build test regression memory tin dtm dtmdiff anchor las settings reclassify neighbours validate clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -41,6 +41,9 @@ settings: build
 
 reclassify: build
 	$(PY) tests/test_reclassify.py
+
+neighbours: build
+	$(PY) tests/test_neighbours.py
 
 validate: build
 	$(PY) tests/validation/validate_suite.py

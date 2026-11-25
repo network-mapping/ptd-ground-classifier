@@ -16,7 +16,6 @@ from __future__ import annotations
 import faulthandler
 import math
 import os
-import re
 import sys
 import tempfile
 import time
@@ -50,7 +49,6 @@ for _thread_variable in (
 
 try:
     import numpy as np
-    from scipy.spatial import cKDTree
 except ImportError as exc:
     missing = getattr(exc, "name", "a required package")
     raise SystemExit(
@@ -75,6 +73,7 @@ from .reclassify import (
     classify_block,
     reset_input_class_mask,
 )
+from .tiles import footprint_function, halo_in_input_units
 from .utils.loggers import _LOG_STATE, log
 from .utils.params import RunSettings
 
@@ -92,8 +91,7 @@ def configure_run(settings: RunSettings) -> None:
     """Apply a run's settings to this process. Must be called at the start of
     every worker process (Windows multiprocessing spawns fresh interpreters
     that do not inherit the parent's mutated globals) - mirrors the
-    configure_runtime() pattern. The settings that depend on the input
-    file's unit are applied by configure_input_unit()."""
+    configure_runtime() pattern."""
     global RUN_SETTINGS
     RUN_SETTINGS = settings
 
@@ -153,17 +151,6 @@ OUTPUT_SUFFIX = "_AdaptiveGround"
 
 PERFORMANCE_STAGE_TIMINGS = True
 
-# Numeric tile names such as 468500_4966000 are interpreted as the lower-left
-# corner of a nominal square tile in this build - 1500 US survey feet for a
-# feet project, 500 m for a metric project (both conventions the user
-# described directly; see configure_input_unit(), which sets the
-# real value once the project's unit is resolved). Sparse/sliver LAS files
-# often cover only a small part of a tile; using the nominal footprint keeps
-# their 10 m-equivalent adjacent-tile context discoverable.
-NUMERIC_TILE_NAME = re.compile(
-    r"^(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)(?:$|_)"
-)
-
 # A progressive TIN is undefined for fewer than three usable, non-collinear
 # points.  Such tiny/sliver tiles retain their incoming classification rather
 # than aborting an otherwise successful large batch.  The limit prevents a
@@ -204,41 +191,11 @@ FILE_FIXED_MEMORY_MB = 384.0
 FULL_FILE_BYTES_PER_POINT = 96
 
 # TerraScan-style neighbouring-tile context. For every target LAS/LAZ, points
-# from spatially adjacent files are loaded only where they fall within this
-# halo around the target bounds. Temporary halo caches mean each neighbour
-# file is decompressed once per run rather than once for every adjacent tile.
-NEIGHBOUR_HALO = 10.0 / US_FEET_TO_METRES  # 32.808333... USft = 10 m physical.
-# Re-derived per file by configure_input_unit() once the project's real
-# input unit is known (see las.LasDataset.metres_per_unit) - the fixed feet
-# value above is only the pre-configuration default, kept for any direct
-# caller that never resolves a project unit. The metres come from the
-# RunSettings (configure_run()).
-
-# Numeric tile filenames encode a project's standard tile footprint in its
-# own native unit - 1500x1500 US survey feet for a feet project, 500x500 m
-# for a metric project (both conventions described directly by the user).
-# The value below is only the pre-configuration default (feet); like
-# NEIGHBOUR_HALO, configure_input_unit() sets the real value once the
-# project's unit is known.
-NOMINAL_TILE_SIZE_USFT = 1500.0
-
-
-def configure_input_unit(metres_per_input_unit: float) -> None:
-    """Express the unit-dependent settings in the project's real input unit:
-    the neighbour halo (RunSettings.neighbour_halo_m, from configure_run()) and the
-    nominal tile size. Must be called once the input unit is known, before
-    any neighbour-tile discovery or halo-buffered classify_file work runs,
-    and re-called at the start of any worker process that does not inherit
-    this process's mutated globals (Windows multiprocessing spawn), after
-    configure_run()."""
-    global NEIGHBOUR_HALO, NOMINAL_TILE_SIZE_USFT
-    NEIGHBOUR_HALO = RUN_SETTINGS.neighbour_halo_m / max(metres_per_input_unit, 1.0e-9)
-    # metres_per_input_unit == 1.0 for a metres project (native tile = 500),
-    # US_FEET_TO_METRES for a feet project (native tile = 1500).
-    NOMINAL_TILE_SIZE_USFT = (
-        500.0 if abs(metres_per_input_unit - 1.0) < 1.0e-6 else 1500.0
-    )
-
+# from spatially adjacent files are loaded only where they fall within the
+# neighbour halo (RunSettings.neighbour_halo_m, converted to the files' unit
+# by tiles.halo_in_input_units) around the target bounds. Temporary halo caches
+# mean each neighbour file is decompressed once per run rather than once for
+# every adjacent tile. Which files are neighbours is LasDataset.neighbours.
 
 HALO_CACHE_CHUNK_POINTS = 1_000_000
 HALO_CACHE_BYTES_PER_POINT = 25
@@ -292,15 +249,6 @@ class MemorySnapshot:
 
     total: int
     available: int
-
-
-@dataclass(frozen=True)
-class InputMetadata:
-    path: Path
-    point_count: int
-    record_size: int
-    bounds: tuple[float, float, float, float]
-    neighbour_bounds: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -1031,8 +979,20 @@ def classify_file(
     if neighbour_bounds is None:
         neighbour_bounds = target_bounds
 
+    # unit_scale is metres-per-input-unit: US_FEET_TO_METRES for a
+    # feet project, 1.0 for a metres project (las.LasDataset.metres_per_unit).
+    # Callers that already resolved this pass it in; falling back to feet here
+    # only matters for direct calls from outside run_batch()'s resolution, kept only
+    # for backward compatibility with any external script calling classify_file
+    # directly.
+    unit_scale = (
+        input_unit_scale if input_unit_scale is not None
+        else US_FEET_TO_METRES
+    )
+    halo = halo_in_input_units(RUN_SETTINGS.neighbour_halo_m, unit_scale)
+
     halo_x_usft, halo_y_usft, halo_z_usft, halo_classification = load_halo_points(
-        neighbour_caches, neighbour_bounds
+        neighbour_caches, neighbour_bounds, halo
     )
     if halo_x_usft.size:
         all_x_usft = np.concatenate((target_x_usft, halo_x_usft))
@@ -1044,7 +1004,7 @@ def classify_file(
         log(
             f"Neighbour context: {halo_x_usft.size:,} points from "
             f"{len(neighbour_caches)} adjacent file(s), "
-            f"{NEIGHBOUR_HALO:.3f} native-unit halo "
+            f"{halo:.3f} native-unit halo "
             f"({RUN_SETTINGS.neighbour_halo_m:g} m physical)"
         )
     else:
@@ -1058,17 +1018,6 @@ def classify_file(
     # records/header remain untouched; only the output classification byte is
     # changed. This avoids a fragile manual conversion of hundreds of distance,
     # RMSE, curvature and regression-conditioning constants.
-    #
-    # unit_scale is metres-per-input-unit: US_FEET_TO_METRES for a
-    # feet project, 1.0 for a metres project (las.LasDataset.metres_per_unit).
-    # Callers that already resolved this pass it in; falling back to feet here
-    # only matters for direct calls from outside main()'s resolution, kept only
-    # for backward compatibility with any external script calling classify_file
-    # directly.
-    unit_scale = (
-        input_unit_scale if input_unit_scale is not None
-        else US_FEET_TO_METRES
-    )
     x = all_x_usft * unit_scale
     y = all_y_usft * unit_scale
     z = all_z_usft * unit_scale
@@ -1196,124 +1145,6 @@ def classify_file(
     )
     log(f"Completed in {elapsed / 60.0:.1f} minutes")
     return FileResult(elapsed, int(target_point_count), counts)
-
-
-def nominal_neighbour_bounds(
-    input_path: Path,
-    data_bounds: tuple[float, float, float, float],
-    point_count: int,
-) -> tuple[float, float, float, float]:
-    """Return a validated filename-derived tile footprint when available."""
-    match = NUMERIC_TILE_NAME.match(input_path.stem)
-    if match is None:
-        return data_bounds
-
-    origin_x = float(match.group(1))
-    origin_y = float(match.group(2))
-    nominal = (
-        origin_x,
-        origin_y,
-        origin_x + NOMINAL_TILE_SIZE_USFT,
-        origin_y + NOMINAL_TILE_SIZE_USFT,
-    )
-    if point_count == 0:
-        return nominal
-
-    # Only trust the naming convention when the header bounds actually fit
-    # that square.  This avoids treating unrelated numeric filenames as map
-    # tile origins.
-    tolerance = max(1.0, NEIGHBOUR_HALO)
-    xmin, ymin, xmax, ymax = data_bounds
-    finite = all(math.isfinite(value) for value in data_bounds)
-    contained = (
-        xmin >= nominal[0] - tolerance
-        and ymin >= nominal[1] - tolerance
-        and xmax <= nominal[2] + tolerance
-        and ymax <= nominal[3] + tolerance
-    )
-    return nominal if finite and contained else data_bounds
-
-
-def input_metadata(source: LasFile) -> InputMetadata:
-    """What the scheduler needs to know about a file, from its header (no points are read)."""
-    header = source.header
-    bounds = header.extent_xy
-    return InputMetadata(
-        source.path,
-        int(header.point_count),
-        header.point_format_size,
-        bounds,
-        nominal_neighbour_bounds(source.path, bounds, int(header.point_count)),
-    )
-
-
-def find_neighbour_sources(
-    targets: list[InputMetadata],
-    candidates: list[InputMetadata],
-) -> dict[Path, tuple[Path, ...]]:
-    """Find files intersecting each target's expanded (by the neighbour halo) bounds."""
-    result = {target.path: tuple() for target in targets}
-    if NEIGHBOUR_HALO <= 0 or len(candidates) < 2:
-        return result
-
-    centers = np.array(
-        [
-            [(item.neighbour_bounds[0] + item.neighbour_bounds[2]) * 0.5,
-             (item.neighbour_bounds[1] + item.neighbour_bounds[3]) * 0.5]
-            for item in candidates
-        ],
-        dtype=np.float64,
-    )
-    half_diagonal = np.array(
-        [
-            0.5
-            * math.hypot(
-                item.neighbour_bounds[2] - item.neighbour_bounds[0],
-                item.neighbour_bounds[3] - item.neighbour_bounds[1],
-            )
-            for item in candidates
-        ],
-        dtype=np.float64,
-    )
-    tree = cKDTree(centers)
-    largest_half_diagonal = float(np.max(half_diagonal))
-    candidate_position = {
-        item.path: position
-        for position, item in enumerate(candidates)
-    }
-
-    for target in targets:
-        target_position = candidate_position[target.path]
-        search_radius = (
-            half_diagonal[target_position]
-            + largest_half_diagonal
-            + NEIGHBOUR_HALO
-        )
-        positions = tree.query_ball_point(
-            centers[target_position], search_radius
-        )
-        txmin, tymin, txmax, tymax = target.neighbour_bounds
-        expanded = (
-            txmin - NEIGHBOUR_HALO,
-            tymin - NEIGHBOUR_HALO,
-            txmax + NEIGHBOUR_HALO,
-            tymax + NEIGHBOUR_HALO,
-        )
-        neighbours: list[Path] = []
-        for position in positions:
-            candidate = candidates[int(position)]
-            if candidate.path == target.path:
-                continue
-            xmin, ymin, xmax, ymax = candidate.neighbour_bounds
-            if (
-                xmax >= expanded[0]
-                and xmin <= expanded[2]
-                and ymax >= expanded[1]
-                and ymin <= expanded[3]
-            ):
-                neighbours.append(candidate.path)
-        result[target.path] = tuple(sorted(neighbours, key=str))
-    return result
 
 
 def create_halo_cache_worker(
@@ -1666,14 +1497,15 @@ def build_halo_caches(
 def load_halo_points(
     caches: tuple[HaloCacheInfo, ...],
     target_bounds: tuple[float, float, float, float],
+    halo: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load only cached returns within 10 m of this target file."""
+    """Load only cached returns within `halo` (the file's unit) of this target file."""
     xmin, ymin, xmax, ymax = target_bounds
     expanded = (
-        xmin - NEIGHBOUR_HALO,
-        ymin - NEIGHBOUR_HALO,
-        xmax + NEIGHBOUR_HALO,
-        ymax + NEIGHBOUR_HALO,
+        xmin - halo,
+        ymin - halo,
+        xmax + halo,
+        ymax + halo,
     )
     x_parts: list[np.ndarray] = []
     y_parts: list[np.ndarray] = []
@@ -1746,7 +1578,9 @@ def density_points_in_rect(
 
 
 def estimate_target_memory(
-    metadata: InputMetadata,
+    source: LasFile,
+    neighbour_bounds: tuple[float, float, float, float],
+    halo: float,
     neighbour_caches: tuple[HaloCacheInfo, ...],
     unit_scale: float,
     density: SourceDensity | None,
@@ -1770,12 +1604,13 @@ def estimate_target_memory(
     DENSITY_ESTIMATE_MARGIN). Falls back to the older, more cautious
     figures whenever a grid is missing or anything looks inconsistent.
     """
-    point_count = max(0, int(metadata.point_count))
+    header = source.header
+    point_count = max(0, int(header.point_count))
     cache_points = sum(info.point_count for info in neighbour_caches)
     file_resident = int(
         FILE_FIXED_MEMORY_MB * 1024**2
         + point_count
-        * max(FULL_FILE_BYTES_PER_POINT, metadata.record_size + 64)
+        * max(FULL_FILE_BYTES_PER_POINT, header.point_format_size + 64)
     )
     cautious_resident = file_resident + int(
         cache_points * HALO_CACHE_BYTES_PER_POINT
@@ -1787,7 +1622,7 @@ def estimate_target_memory(
             cautious_resident, cautious_window, 1, cautious_window
         )
     try:
-        bxmin, bymin, bxmax, bymax = metadata.bounds
+        bxmin, bymin, bxmax, bymax = header.extent_xy
         cores = [
             core
             for _, core in window_cores_for_extent(
@@ -1800,12 +1635,12 @@ def estimate_target_memory(
         ]
         window_count = max(1, len(cores))
 
-        xmin, ymin, xmax, ymax = metadata.neighbour_bounds
+        xmin, ymin, xmax, ymax = neighbour_bounds
         expanded = (
-            xmin - NEIGHBOUR_HALO,
-            ymin - NEIGHBOUR_HALO,
-            xmax + NEIGHBOUR_HALO,
-            ymax + NEIGHBOUR_HALO,
+            xmin - halo,
+            ymin - halo,
+            xmax + halo,
+            ymax + halo,
         )
 
         def neighbour_points(
@@ -1969,7 +1804,6 @@ def classify_file_worker(
     input_path = Path(input_path_text)
     configure_runtime(cpu_slots, f"[{input_path.stem}] ")
     configure_run(settings)
-    configure_input_unit(unit_scale)
     return classify_file(
         LasFile.from_file(input_path),
         Path(output_path_text),
@@ -2036,12 +1870,9 @@ def run_batch(
     files that failed, and the CPU/RAM limits the scheduler used.
     """
     configure_run(settings)
-    # NEIGHBOUR_HALO is a single process-wide value used while discovering
-    # which files are spatial neighbours of each other, before any one
-    # file's classification begins - it needs the dataset's one unit, which
-    # every file's classification uses too.
     unit_scale = dataset.metres_per_unit
-    configure_input_unit(unit_scale)
+    halo = halo_in_input_units(settings.neighbour_halo_m, unit_scale)
+    footprint_of = footprint_function(dataset, halo)
 
     unit_summary = UNIT_LABELS[dataset.units]
     low_veg, medium_veg, high_veg = settings.hag_bands
@@ -2099,30 +1930,29 @@ def run_batch(
     # The tasks still discover spatial neighbours among the dataset's other
     # files. Those neighbours provide context but are not written unless they
     # were also supplied as targets.
-    candidate_metadata = [input_metadata(source) for source in dataset.sources]
-    metadata_by_path = {
-        metadata.path: metadata for metadata in candidate_metadata
+    target_paths = [input_path for input_path, _ in tasks]
+    neighbour_bounds_by_path = {
+        source.path: footprint_of(source) for source in dataset.sources
     }
-    target_metadata = [
-        metadata_by_path[input_path]
-        for input_path, _ in tasks
-    ]
-    neighbours_by_target = find_neighbour_sources(
-        target_metadata, candidate_metadata
-    )
+    neighbours_by_target = {
+        path: tuple(source.path for source in sources)
+        for path, sources in dataset.neighbours(
+            halo, targets=target_paths, footprint=footprint_of
+        ).items()
+    }
 
     source_requests: dict[
         Path, set[tuple[float, float, float, float]]
     ] = {}
-    for target in target_metadata:
-        xmin, ymin, xmax, ymax = target.neighbour_bounds
+    for target_path in target_paths:
+        xmin, ymin, xmax, ymax = neighbour_bounds_by_path[target_path]
         expanded = (
-            xmin - NEIGHBOUR_HALO,
-            ymin - NEIGHBOUR_HALO,
-            xmax + NEIGHBOUR_HALO,
-            ymax + NEIGHBOUR_HALO,
+            xmin - halo,
+            ymin - halo,
+            xmax + halo,
+            ymax + halo,
         )
-        for source in neighbours_by_target[target.path]:
+        for source in neighbours_by_target[target_path]:
             source_requests.setdefault(source, set()).add(expanded)
 
     results: dict[Path, FileResult] = {}
@@ -2155,15 +1985,15 @@ def run_batch(
         # Workers only need each cache's location and size; the density
         # grids stay in this process, where the scheduler uses them.
         target_caches = {
-            target.path: tuple(
+            target_path: tuple(
                 HaloCacheInfo(
                     halo_caches[source].path,
                     halo_caches[source].point_count,
                 )
-                for source in neighbours_by_target[target.path]
+                for source in neighbours_by_target[target_path]
                 if source in halo_caches
             )
-            for target in target_metadata
+            for target_path in target_paths
         }
 
         # How the batch is run.
@@ -2184,7 +2014,9 @@ def run_batch(
         if AUTO_PARALLEL and len(tasks) > 1 and cpu_budget > 1:
             for input_path, _ in tasks:
                 memory_plans[input_path] = estimate_target_memory(
-                    metadata_by_path[input_path],
+                    dataset.file(input_path),
+                    neighbour_bounds_by_path[input_path],
+                    halo,
                     tuple(
                         halo_caches[source]
                         for source in neighbours_by_target[input_path]
@@ -2222,7 +2054,6 @@ def run_batch(
             )
             for input_path, output_path in task_list:
                 configure_runtime(cpu_budget)
-                configure_input_unit(unit_scale)
                 try:
                     results[input_path] = classify_file(
                         dataset.file(input_path),
@@ -2231,10 +2062,8 @@ def run_batch(
                         memory_budget=memory_budget,
                         kdtree_workers=cpu_budget,
                         neighbour_caches=target_caches[input_path],
-                        target_bounds=metadata_by_path[input_path].bounds,
-                        neighbour_bounds=(
-                            metadata_by_path[input_path].neighbour_bounds
-                        ),
+                        target_bounds=dataset.file(input_path).header.extent_xy,
+                        neighbour_bounds=neighbour_bounds_by_path[input_path],
                         input_unit_scale=unit_scale,
                     )
                 except Exception as exc:
@@ -2367,8 +2196,8 @@ def run_batch(
                                     else max(threads, cpu_budget // files)
                                 ),
                                 target_caches[input_path],
-                                metadata_by_path[input_path].bounds,
-                                metadata_by_path[input_path].neighbour_bounds,
+                                dataset.file(input_path).header.extent_xy,
+                                neighbour_bounds_by_path[input_path],
                                 settings,
                                 unit_scale,
                                 threads,
