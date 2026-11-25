@@ -5,10 +5,10 @@
 # files of different units in separate runs. The same option on the command line (--units) takes
 # priority over this file.
 input:
-  # Coordinate unit of the files: auto, usft or metres. 'auto' reads each file's own CRS metadata
-  # and only proceeds when the unit is unambiguous; the tool refuses to guess rather than silently
-  # corrupt output. If a file has no CRS metadata (common - many production LAS files omit it), set
-  # usft or metres explicitly.
+  # Coordinate unit of the files: auto, metres, usft (US survey feet) or foot (international feet).
+  # 'auto' reads the unit from the files' CRS, which every file must carry, be projected and share;
+  # the tool refuses to guess rather than silently corrupt output. If the files have no CRS (common
+  # - many production LAS files omit it) or you want to override it, state the unit explicitly.
   units: auto
   # Metres around each tile that are read from the adjacent tiles, so ground near a tile edge is
   # classified with its neighbours' points. This changes classifications near tile edges. 0 = no

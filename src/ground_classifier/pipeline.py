@@ -11,7 +11,7 @@ above the finished ground surface, in metres. The output codes below are the def
     7  Noise: isolated low points, and HAG > high_veg_max
 
 Every threshold is in metres. Input X/Y/Z are converted to metres once, in
-memory, in classify_file(), using the file's resolved unit (see units.py); the
+memory, in classify_file(), using the run's unit (see las.LasDataset.metres_per_unit); the
 LAS coordinates on disk are never rewritten.
 """
 
@@ -53,7 +53,6 @@ for _thread_variable in (
     os.environ[_thread_variable] = "1"
 
 try:
-    import laspy
     import numpy as np
     from scipy.spatial import cKDTree
 except ImportError as exc:
@@ -65,7 +64,18 @@ except ImportError as exc:
 
 from . import __version__, dtm, fast_ground, ply
 from .feature_codes import FeatureCodes
-from .units import METRES_PER_US_SURVEY_FOOT, metres_to_usft
+from .las import (
+    UNIT_LABELS,
+    UNIT_OPTION_NAMES,
+    US_FEET_TO_METRES,
+    LasHeader,
+    drop_extra_dimensions,
+    iter_record_batches,
+    lasfiles_in_dir,
+    read_tile,
+    unit_for_scale,
+    write_tile,
+)
 from .utils.loggers import _LOG_STATE, log
 from .utils.params import (
     DEFAULT_HIGH_VEG_MAX,
@@ -255,7 +265,7 @@ FULL_FILE_BYTES_PER_POINT = 96
 # from spatially adjacent files are loaded only where they fall within this
 # halo around the target bounds. Temporary halo caches mean each neighbour
 # file is decompressed once per run rather than once for every adjacent tile.
-NEIGHBOUR_HALO = metres_to_usft(10.0)  # 32.808333... USft = 10 m physical.
+NEIGHBOUR_HALO = 10.0 / US_FEET_TO_METRES  # 32.808333... USft = 10 m physical.
 NEIGHBOUR_HALO_METRES = 10.0
 # Re-derived per run by configure_neighbour_halo() once the project's real
 # input unit is known (see detect_input_unit_scale) - the fixed feet value
@@ -290,7 +300,7 @@ NOMINAL_TILE_SIZE_USFT = 1500.0
 def configure_nominal_tile_size(metres_per_input_unit: float) -> None:
     global NOMINAL_TILE_SIZE_USFT
     # metres_per_input_unit == 1.0 for a metres project (native tile = 500),
-    # METRES_PER_US_SURVEY_FOOT for a feet project (native tile = 1500).
+    # US_FEET_TO_METRES for a feet project (native tile = 1500).
     NOMINAL_TILE_SIZE_USFT = (
         500.0 if abs(metres_per_input_unit - 1.0) < 1.0e-6 else 1500.0
     )
@@ -532,25 +542,6 @@ def reset_input_class_mask(classification: np.ndarray) -> np.ndarray:
 # required by this classifier and should not be propagated to delivery files.
 # All other input Extra Bytes dimensions and VLRs are preserved.
 STRIP_OUTPUT_EXTRA_DIMENSIONS = ("Distance",)
-
-
-def strip_unwanted_output_extra_dimensions(las: "laspy.LasData") -> tuple[str, ...]:
-    """Remove only explicitly configured temporary Extra Bytes dimensions.
-
-    Matching is case-insensitive, but the exact stored dimension name is passed
-    back to laspy. ``remove_extra_dim`` updates both the point-record layout and
-    the LAS Extra Bytes VLR, so a lone int32 Distance field is removed cleanly
-    rather than merely hiding its descriptor.
-    """
-    configured = {name.casefold() for name in STRIP_OUTPUT_EXTRA_DIMENSIONS}
-    present = [str(name) for name in las.point_format.extra_dimension_names]
-    removed: list[str] = []
-    for name in present:
-        if name.casefold() not in configured:
-            continue
-        las.remove_extra_dim(name)
-        removed.append(name)
-    return tuple(removed)
 
 
 def assign_hag_classes(
@@ -893,7 +884,7 @@ def export_window_dtm(
         grid,
         cells,
         export.cell,
-        "metres" if abs(scale - 1.0) < 1.0e-9 else "usft",
+        UNIT_OPTION_NAMES[unit_for_scale(scale)],
         (
             f"ground-classifier {__version__} DTM of {export.stem}, window {window_number}",
             "lowest ground point of each cell; cells owned by this window's core",
@@ -1162,12 +1153,12 @@ def classify_file(
     neighbour_caches: tuple[HaloCacheInfo, ...] = (),
     target_bounds: tuple[float, float, float, float] | None = None,
     neighbour_bounds: tuple[float, float, float, float] | None = None,
-    input_unit_scale: float = METRES_PER_US_SURVEY_FOOT,
+    input_unit_scale: float = US_FEET_TO_METRES,
 ) -> FileResult:
     started = time.perf_counter()
     log(f"\nReading: {input_path}")
     read_started = time.perf_counter()
-    las = laspy.read(input_path)
+    tile = read_tile(input_path)
     if PERFORMANCE_STAGE_TIMINGS:
         log(
             f"TIMING LAZ read: "
@@ -1181,24 +1172,22 @@ def classify_file(
     # below keep their historical "_usft" suffix for now (from before this
     # tool supported metric input) - the values themselves are genuinely
     # native-unit, not always feet.
-    target_x_usft = np.asarray(las.x, dtype=np.float64)
-    target_y_usft = np.asarray(las.y, dtype=np.float64)
-    target_z_usft = np.asarray(las.z, dtype=np.float64)
+    target_x_usft = np.asarray(tile.x, dtype=np.float64)
+    target_y_usft = np.asarray(tile.y, dtype=np.float64)
+    target_z_usft = np.asarray(tile.z, dtype=np.float64)
     target_classification = np.asarray(
-        las.classification, dtype=np.uint8
+        tile.classification, dtype=np.uint8
     )
     target_point_count = target_x_usft.size
     if target_point_count == 0:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        removed_extra = strip_unwanted_output_extra_dimensions(las)
+        removed_extra = drop_extra_dimensions(tile, STRIP_OUTPUT_EXTRA_DIMENSIONS)
         if removed_extra:
             log(
                 "Removed temporary output Extra Bytes dimension(s): "
                 + ", ".join(removed_extra)
             )
         log("Empty input tile: writing output with classification/header policy applied.")
-        las.header.generating_software = GENERATING_SOFTWARE
-        las.write(output_path)
+        write_tile(output_path, tile, generating_software=GENERATING_SOFTWARE)
         return FileResult(time.perf_counter() - started, 0, {})
 
     # target_bounds / neighbour_bounds stay in the file's native input unit
@@ -1242,15 +1231,15 @@ def classify_file(
     # changed. This avoids a fragile manual conversion of hundreds of distance,
     # RMSE, curvature and regression-conditioning constants.
     #
-    # unit_scale is metres-per-input-unit: METRES_PER_US_SURVEY_FOOT for a
-    # feet project, 1.0 for a metres project (see detect_input_unit_scale /
-    # resolve_input_unit_scale). Callers that already resolved this per file
-    # pass it in; falling back to feet here only matters for direct calls
-    # from outside main()'s per-file resolution, kept only for backward
-    # compatibility with any external script calling classify_file directly.
+    # unit_scale is metres-per-input-unit: US_FEET_TO_METRES for a
+    # feet project, 1.0 for a metres project (las.LasDataset.metres_per_unit).
+    # Callers that already resolved this pass it in; falling back to feet here
+    # only matters for direct calls from outside main()'s resolution, kept only
+    # for backward compatibility with any external script calling classify_file
+    # directly.
     unit_scale = (
         input_unit_scale if input_unit_scale is not None
-        else METRES_PER_US_SURVEY_FOOT
+        else US_FEET_TO_METRES
     )
     x = all_x_usft * unit_scale
     y = all_y_usft * unit_scale
@@ -1342,24 +1331,22 @@ def classify_file(
             f"{time.perf_counter() - processing_started:.1f} s"
         )
 
-    las.classification = classification_out[:target_point_count]
+    tile.classification = classification_out[:target_point_count]
 
     # Do not propagate TerraScan's temporary Distance Extra Byte into the
     # classified output. This changes only the point-record layout/header; XYZ,
     # standard LAS dimensions, classifications and all other Extra Bytes/VLRs
     # remain intact.
-    removed_extra = strip_unwanted_output_extra_dimensions(las)
+    removed_extra = drop_extra_dimensions(tile, STRIP_OUTPUT_EXTRA_DIMENSIONS)
     if removed_extra:
         log(
             "Removed temporary output Extra Bytes dimension(s): "
             + ", ".join(removed_extra)
         )
 
-    las.header.generating_software = GENERATING_SOFTWARE
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     log(f"Writing: {output_path}")
     write_started = time.perf_counter()
-    las.write(output_path)
+    write_tile(output_path, tile, generating_software=GENERATING_SOFTWARE)
     if PERFORMANCE_STAGE_TIMINGS:
         log(
             f"TIMING LAZ write: "
@@ -1381,12 +1368,6 @@ def classify_file(
     )
     log(f"Completed in {elapsed / 60.0:.1f} minutes")
     return FileResult(elapsed, int(target_point_count), counts)
-
-
-def discover_inputs(folder: Path) -> list[Path]:
-    inputs = sorted(folder.glob("*.las"))
-    inputs.extend(sorted(folder.glob("*.laz")))
-    return inputs
 
 
 def nominal_neighbour_bounds(
@@ -1427,22 +1408,15 @@ def nominal_neighbour_bounds(
 
 def read_input_metadata(input_path: Path) -> InputMetadata:
     """Read only the LAS/LAZ header needed for spatial scheduling."""
-    with laspy.open(input_path) as reader:
-        header = reader.header
-        point_count = int(header.point_count)
-        bounds = (
-            float(header.mins[0]),
-            float(header.mins[1]),
-            float(header.maxs[0]),
-            float(header.maxs[1]),
-        )
-        return InputMetadata(
-            input_path,
-            point_count,
-            int(header.point_format.size),
-            bounds,
-            nominal_neighbour_bounds(input_path, bounds, point_count),
-        )
+    header = LasHeader.from_file(input_path)
+    bounds = header.extent_xy
+    return InputMetadata(
+        input_path,
+        int(header.point_count),
+        header.point_format_size,
+        bounds,
+        nominal_neighbour_bounds(input_path, bounds, int(header.point_count)),
+    )
 
 
 def find_neighbour_sources(
@@ -1527,71 +1501,69 @@ def create_halo_cache_worker(
     density_counts: np.ndarray | None = None
     density_bounds: tuple[float, float, float, float] | None = None
     with cache_path.open("wb") as output_stream:
-        with laspy.open(source_path) as reader:
-            try:
-                gxmin = float(reader.header.mins[0])
-                gymin = float(reader.header.mins[1])
-                gxmax = float(reader.header.maxs[0])
-                gymax = float(reader.header.maxs[1])
-                if (
-                    all(
-                        math.isfinite(value)
-                        for value in (gxmin, gymin, gxmax, gymax)
-                    )
-                    and gxmax > gxmin
-                    and gymax > gymin
-                ):
-                    density_bounds = (gxmin, gymin, gxmax, gymax)
-                    density_counts = np.zeros(cells * cells, dtype=np.int64)
-            except Exception:
-                density_counts = None
-            for points in reader.chunk_iterator(HALO_CACHE_CHUNK_POINTS):
-                px = np.asarray(points.x, dtype=np.float64)
-                py = np.asarray(points.y, dtype=np.float64)
-                if density_counts is not None and density_bounds is not None:
-                    # Scheduling aid only; see DENSITY_GRID_CELLS.
-                    cell_x = np.clip(
-                        np.floor(
-                            (px - density_bounds[0])
-                            * (cells / (density_bounds[2] - density_bounds[0]))
-                        ),
-                        0,
-                        cells - 1,
-                    ).astype(np.int64)
-                    cell_y = np.clip(
-                        np.floor(
-                            (py - density_bounds[1])
-                            * (cells / (density_bounds[3] - density_bounds[1]))
-                        ),
-                        0,
-                        cells - 1,
-                    ).astype(np.int64)
-                    density_counts += np.bincount(
-                        cell_x * cells + cell_y,
-                        minlength=cells * cells,
-                    )
-                selected = np.zeros(px.size, dtype=bool)
-                for xmin, ymin, xmax, ymax in requested_bounds:
-                    selected |= (
-                        (px >= xmin)
-                        & (px <= xmax)
-                        & (py >= ymin)
-                        & (py <= ymax)
-                    )
-                count = int(np.count_nonzero(selected))
-                if count == 0:
-                    continue
-                records = np.empty(count, dtype=HALO_CACHE_DTYPE)
-                records["x"] = px[selected]
-                records["y"] = py[selected]
-                records["z"] = np.asarray(
-                    points.z, dtype=np.float64
-                )[selected]
-                records["classification"] = np.asarray(
-                    points.classification, dtype=np.uint8
-                )[selected]
-                records.tofile(output_stream)
-                point_count += count
+        try:
+            gxmin, gymin, gxmax, gymax = LasHeader.from_file(source_path).extent_xy
+            if (
+                all(
+                    math.isfinite(value)
+                    for value in (gxmin, gymin, gxmax, gymax)
+                )
+                and gxmax > gxmin
+                and gymax > gymin
+            ):
+                density_bounds = (gxmin, gymin, gxmax, gymax)
+                density_counts = np.zeros(cells * cells, dtype=np.int64)
+        except Exception:
+            density_counts = None
+        for points in iter_record_batches(
+            source_path, batch_size=HALO_CACHE_CHUNK_POINTS
+        ):
+            px = np.asarray(points.x, dtype=np.float64)
+            py = np.asarray(points.y, dtype=np.float64)
+            if density_counts is not None and density_bounds is not None:
+                # Scheduling aid only; see DENSITY_GRID_CELLS.
+                cell_x = np.clip(
+                    np.floor(
+                        (px - density_bounds[0])
+                        * (cells / (density_bounds[2] - density_bounds[0]))
+                    ),
+                    0,
+                    cells - 1,
+                ).astype(np.int64)
+                cell_y = np.clip(
+                    np.floor(
+                        (py - density_bounds[1])
+                        * (cells / (density_bounds[3] - density_bounds[1]))
+                    ),
+                    0,
+                    cells - 1,
+                ).astype(np.int64)
+                density_counts += np.bincount(
+                    cell_x * cells + cell_y,
+                    minlength=cells * cells,
+                )
+            selected = np.zeros(px.size, dtype=bool)
+            for xmin, ymin, xmax, ymax in requested_bounds:
+                selected |= (
+                    (px >= xmin)
+                    & (px <= xmax)
+                    & (py >= ymin)
+                    & (py <= ymax)
+                )
+            count = int(np.count_nonzero(selected))
+            if count == 0:
+                continue
+            records = np.empty(count, dtype=HALO_CACHE_DTYPE)
+            records["x"] = px[selected]
+            records["y"] = py[selected]
+            records["z"] = np.asarray(
+                points.z, dtype=np.float64
+            )[selected]
+            records["classification"] = np.asarray(
+                points.classification, dtype=np.uint8
+            )[selected]
+            records.tofile(output_stream)
+            point_count += count
     density = (
         SourceDensity(
             density_bounds,
@@ -2216,27 +2188,25 @@ def reusable_existing_output(input_path: Path, output_path: Path) -> bool:
         return False
     try:
         stripped = {name.casefold() for name in STRIP_OUTPUT_EXTRA_DIMENSIONS}
-        with laspy.open(input_path) as source_reader:
-            source_header = source_reader.header
-            expected_extra = tuple(
-                str(name)
-                for name in source_header.point_format.extra_dimension_names
-                if str(name).casefold() not in stripped
-            )
-            expected_signature = (
-                int(source_header.point_count),
-                int(source_header.point_format.id),
-                expected_extra,
-            )
-        with laspy.open(output_path) as output_reader:
-            output_header = output_reader.header
-            if output_header.generating_software != GENERATING_SOFTWARE:
-                return False
-            output_signature = (
-                int(output_header.point_count),
-                int(output_header.point_format.id),
-                tuple(str(name) for name in output_header.point_format.extra_dimension_names),
-            )
+        source_header = LasHeader.from_file(input_path)
+        expected_extra = tuple(
+            name
+            for name in source_header.extra_dimension_names
+            if name.casefold() not in stripped
+        )
+        expected_signature = (
+            int(source_header.point_count),
+            int(source_header.point_format_id),
+            expected_extra,
+        )
+        output_header = LasHeader.from_file(output_path)
+        if output_header.generating_software != GENERATING_SOFTWARE:
+            return False
+        output_signature = (
+            int(output_header.point_count),
+            int(output_header.point_format_id),
+            output_header.extra_dimension_names,
+        )
         return expected_signature == output_signature
     except Exception:
         return False
@@ -2275,7 +2245,7 @@ def run_batch(
     configure_nominal_tile_size(unit_scale_by_path[tasks[0][0]])
 
     unit_labels = sorted({
-        "US survey feet" if abs(scale - 1.0) > 1.0e-9 else "metres"
+        UNIT_LABELS[unit_for_scale(scale)]
         for scale in unit_scale_by_path.values()
     })
     unit_summary = " and ".join(unit_labels) if unit_labels else "unknown"
@@ -2285,8 +2255,8 @@ def run_batch(
         for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
     )
     log(
-        f"Unit mode: this run's input is {unit_summary} (resolved per file "
-        "from CRS metadata, the config file or --units). Classification geometry is normalized "
+        f"Unit mode: this run's input is {unit_summary} (from CRS metadata, "
+        "the config file or --units). Classification geometry is normalized "
         "to metres in memory; LAS XYZ is never rewritten. Output vegetation: "
         f"class {low_code} <={low_veg:g} m, class {medium_code} {low_veg:g}-{medium_veg:g} m, "
         f"class {high_code} >={medium_veg:g} m (see the hag section of the config file)."
@@ -2340,7 +2310,7 @@ def run_batch(
     candidate_paths = set(inputs)
     for parent in {path.parent for path in inputs}:
         candidate_paths.update(
-            path.resolve() for path in discover_inputs(parent)
+            path.resolve() for path in lasfiles_in_dir(parent)
         )
     candidate_metadata = [
         read_input_metadata(path)

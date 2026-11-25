@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 from .. import __version__, ptdcore
+from ..las import UNITS_CHOICES
 from .config import CONFIG_ENV_VAR, CONFIG_FILENAME
 
 
@@ -25,7 +26,7 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, metavar="FILE",
                         help=f"YAML config file (default: ${CONFIG_ENV_VAR}, then ./{CONFIG_FILENAME}, then "
                              f"./config/{CONFIG_FILENAME}, then built-in defaults).")
-    parser.add_argument("--units", choices=("auto", "usft", "metres"), default=None,
+    parser.add_argument("--units", choices=UNITS_CHOICES, default=None,
                         help="Input coordinate unit; overrides the config file.")
     parser.add_argument("--workers", type=int, default=0,
                         help="Total CPU worker budget; 0 = config file, then automatic.")

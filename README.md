@@ -7,7 +7,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `utils` (command line, run configuration, logging: see its README), `units`, `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `las` (reading and writing LAS/LAZ: headers, CRS and units, tile I/O; the only place the classify path touches laspy), `utils` (command line, run configuration, logging: see its README), `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `ground_classifier_config.yml`: the settings (sections `input`, `performance`, `dtm`, `hag`, `engine`) |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
@@ -36,6 +36,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make dtm` | The DTM export: raster module, per-window rasters, command line. |
 | `make dtmdiff` | The DTM subtraction: `dtm.subtract()` and `ground-classify dtm-diff`. |
 | `make anchor` | The temporary `--anchor-seeds` option: fixed-grid starting squares. |
+| `make las` | The `las` package: units and the override, input expansion, whole-tile read and write. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
 All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.

@@ -86,9 +86,10 @@ Compare two output folders, optionally against TerraScan tiles:
 
 ## Units and classes
 
-The tool reads each file's CRS metadata to decide between US survey feet and metres and stops if it cannot
-tell. Use `--units usft|metres` (or `units` in the config file's `input` section) for files without CRS metadata; keep
-feet and metric projects in separate runs. Every threshold is in metres; coordinates on disk are never rewritten.
+The tool reads the files' CRS to decide between US survey feet, international feet and metres and stops if it cannot
+tell (no CRS, a non-projected CRS, or different horizontal and vertical units). Use `--units usft|foot|metres` (or `units`
+in the config file's `input` section) for such files, or to override the CRS; keep feet and metric projects in separate
+runs. Every threshold is in metres; coordinates on disk are never rewritten.
 
 Input classes 2, 3, 4, 5 and 13 are re-labelled: ground 2; the rest 3 / 4 / 5 by height above ground
 using the `hag` section of the config file; above `high_veg_max` or a confirmed isolated low point 7. Other classes are kept.

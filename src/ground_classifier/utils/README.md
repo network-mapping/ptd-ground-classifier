@@ -24,7 +24,7 @@ One YAML file; each top-level key is a section, and its keys are the fields of t
 
 | Section | Param class | Holds |
 | --- | --- | --- |
-| `input` | `InputParam` | `units`: `auto`, `usft` or `metres` (`meters` is accepted). `neighbour_halo`: metres of neighbouring-tile context read around each tile (default 10; 0 = none). |
+| `input` | `InputParam` | `units`: `auto`, `metres`, `usft` (US survey feet) or `foot` (international feet); `meters` is accepted. `neighbour_halo`: metres of neighbouring-tile context read around each tile (default 10; 0 = none). |
 | `performance` | `PerformanceParam` | `workers`, `ram_limit_gb`. |
 | `dtm` | `DtmParam` | `cell_size`. |
 | `hag` | `HagParam` | `low_veg_max`, `medium_veg_max`, `high_veg_max`; `bands` gives the tuple; ordering is checked. |
@@ -70,7 +70,7 @@ def main(argv=None):
 
 ## Dependency order
 
-`utils` imports `fast_ground` and `ptdcore` only. It must not import `pipeline` or the top-level `cli`:
+`utils` imports `las`, `fast_ground` and `ptdcore` only. It must not import `pipeline` or the top-level `cli`:
 
 `utils` → `fast_ground` → `pipeline` → `cli`
 
@@ -83,4 +83,4 @@ def main(argv=None):
 3. If it belongs in the manifest, add it to `Config.as_dict()`.
 4. Pass it down from `classify`; do not read the config from inside the pipeline.
 
-Dependencies: `pyyaml`; otherwise the standard library.
+Dependencies: `pyyaml`, plus whatever `las` needs (`laspy`, and `pyproj` for CRS units); otherwise the standard library.

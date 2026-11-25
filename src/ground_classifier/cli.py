@@ -6,42 +6,58 @@ import sys
 import time
 from pathlib import Path
 
-import laspy
-
 from . import __version__, manifest, ptdcore
+from .las import (
+    UNIT_LABELS,
+    UNIT_OPTION_NAMES,
+    UNITS_AUTO,
+    LasDataset,
+    LasDatasetError,
+    LasHeader,
+    LasUnitsError,
+    expand_inputs,
+    unit_for_scale,
+)
 from .pipeline import (
     OUTPUT_SUFFIX,
-    discover_inputs,
     reusable_existing_output,
     run_batch,
 )
-from .units import resolve_input_unit_scale
 from .utils.args import get_args
 from .utils.config import CONFIG_FILENAME, load_config, write_default_config
-from .utils.loggers import log
+from .utils.loggers import install_logging_bridge, log
 from .utils.params import Config
 
 
 def collect_inputs(paths: list[Path]) -> list[Path]:
-    found: list[Path] = []
-    for path in paths:
-        path = path.resolve()
-        if path.is_dir():
-            found.extend(p.resolve() for p in discover_inputs(path))
-        elif not path.exists():
-            raise SystemExit(f"Input does not exist: {path}")
-        elif path.suffix.lower() not in {".las", ".laz"}:
-            raise SystemExit(f"Input must be LAS or LAZ: {path}")
-        else:
-            found.append(path)
-    unique = sorted(set(found), key=str)
-    if not unique:
-        raise SystemExit("No LAS/LAZ input found.")
-    return unique
+    try:
+        return expand_inputs(paths)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _unit_name(scale: float) -> str:
-    return "metres" if abs(scale - 1.0) < 1.0e-9 else "usft"
+    return UNIT_OPTION_NAMES[unit_for_scale(scale)]
+
+
+def _input_scale(task_inputs: list[Path], units: str) -> float:
+    """Metres per coordinate unit of the files being classified: as stated by --units or the config file, else
+    from their CRS. Exits with a message saying how to state it when the CRS cannot tell."""
+    try:
+        dataset = LasDataset(task_inputs, units=units)
+        if units == UNITS_AUTO and not dataset.files:
+            raise LasUnitsError("Every input tile is empty, so there is no CRS to read the units from.")
+        scale = dataset.metres_per_unit
+    except LasUnitsError as exc:
+        raise SystemExit(
+            f"{exc}\nPass --units metres, usft or foot, or set \"units\" in the config file's input section, "
+            "then run again."
+        ) from exc
+    except (LasDatasetError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if units == UNITS_AUTO:
+        log(f"Input units: {UNIT_LABELS[dataset.units]} (from the CRS, EPSG {dataset.epsg})")
+    return scale
 
 
 def classify(config: Config) -> int:
@@ -63,8 +79,9 @@ def classify(config: Config) -> int:
     tasks: list[tuple[Path, Path]] = []
     for input_path, output_path in pairs:
         if not options.overwrite and reusable_existing_output(input_path, output_path):
-            with laspy.open(output_path) as reader:
-                records[input_path].update(status="reused", generated_by=reader.header.generating_software)
+            records[input_path].update(
+                status="reused", generated_by=LasHeader.from_file(output_path).generating_software
+            )
         else:
             tasks.append((input_path, output_path))
 
@@ -80,7 +97,8 @@ def classify(config: Config) -> int:
         if reused:
             log(f"Reusing {reused:,} complete output(s) from this version. Use --overwrite to rebuild them.")
         if tasks:
-            scale_by_path = {i: resolve_input_unit_scale(i, units_setting) for i, _ in tasks}
+            scale = _input_scale([i for i, _ in tasks], units_setting)
+            scale_by_path = {i: scale for i, _ in tasks}
             for input_path, scale in scale_by_path.items():
                 records[input_path]["unit"] = _unit_name(scale)
             results, failures, resources = run_batch(
@@ -146,6 +164,7 @@ def init_config(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    install_logging_bridge()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "compare":
         from . import compare

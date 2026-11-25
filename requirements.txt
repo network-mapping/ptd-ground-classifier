@@ -1,5 +1,6 @@
 laspy[lazrs]>=2.5
 numpy>=1.24
+pyproj>=3
 pyyaml>=6
 scipy>=1.10
 tifffile>=2023.1

@@ -4,9 +4,9 @@
 scales/offsets, VLRs/EVLRs, ExtraBytes descriptors) and adds the queries and
 transformations applications usually need. It does no point I/O.
 
-Reading a header (cheap; no points are loaded)::
+Reading a header (cheap; no points are loaded, and the CRS is not parsed until asked for)::
 
-    from las.lasheader import LasHeader, LasHeaderError
+    from ground_classifier.las import LasHeader, LasHeaderError
 
     header = LasHeader.from_file('tile.laz')
     header.version              # '1.4'
@@ -16,8 +16,9 @@ Reading a header (cheap; no points are loaded)::
     header.has_dimension('HeightAboveGround')
     header.scales, header.offsets
     header.bounds               # ((xmin, ymin, zmin), (xmax, ymax, zmax)); None if empty
+    header.extent_xy            # (xmin, ymin, xmax, ymax) exactly as the header states it
 
-Coordinate reference system::
+Coordinate reference system (needs ``pyproj``)::
 
     header.crs                  # pyproj.CRS or None
     header.epsg                 # int or None
@@ -41,12 +42,11 @@ Building headers for output::
                                        scales=(0.001, 0.001, 0.001), offsets=(500000, 6000000, 0))
     new_header.validate_coordinates(xyz)            # xyz: (n, 3) array; checks int32 range
 
-Writing with the headers (see ``las.lasio``)::
+Writing with the headers (see ``ground_classifier.las.lasio``)::
 
-    from las.lasio import write_record_batches, write_pipeline
+    from ground_classifier.las import write_record_batches
 
     write_record_batches('out.laz', header, scale_aware_record_batches)
-    writer = write_pipeline('out.laz', header)      # PDAL writer built via pdal_writer_options
 
 ``LasHeader`` instances are safe to share: the constructor and ``native_copy()``
 copy the underlying laspy header, and no method mutates ``self``.
@@ -54,7 +54,6 @@ copy the underlying laspy header, and no method mutates ``self``.
 
 from copy import deepcopy
 from math import fma
-import base64
 import re
 
 import laspy
@@ -78,7 +77,10 @@ class LasHeader:
 
     def __init__(self, native):
         self._native = native.native_copy() if isinstance(native, LasHeader) else native.copy()
-        self._crs = self._native.parse_crs()
+        # Parsed on first use: it needs pyproj, and a header read only for its counts and bounds (the
+        # scheduler, spawned workers) must not depend on the CRS being readable.
+        self._crs = None
+        self._crs_parsed = False
 
     @classmethod
     def from_file(cls, path):
@@ -110,6 +112,21 @@ class LasHeader:
         """Names of all standard and extra dimensions in the point format."""
         return tuple(self._native.point_format.dimension_names)
 
+    @property
+    def extra_dimension_names(self):
+        """Names of the ExtraBytes dimensions in the point format."""
+        return tuple(str(name) for name in self._native.point_format.extra_dimension_names)
+
+    @property
+    def point_format_size(self):
+        """Size in bytes of one point record."""
+        return int(self._native.point_format.size)
+
+    @property
+    def generating_software(self):
+        """The ``generating_software`` field of the header."""
+        return str(self._native.generating_software)
+
     def has_dimension(self, name: str) -> bool:
         """True if ``name`` is an exact (case-sensitive) dimension name."""
         return name in self.dimension_names
@@ -132,8 +149,24 @@ class LasHeader:
         return tuple(self._native.mins), tuple(self._native.maxs)
 
     @property
+    def extent_xy(self):
+        """``(xmin, ymin, xmax, ymax)`` exactly as the header states it, whether or not the file has points."""
+        mins, maxs = self._native.mins, self._native.maxs
+        return float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1])
+
+    @property
     def crs(self):
-        """Parsed ``pyproj.CRS``, or ``None`` if the header carries none."""
+        """Parsed ``pyproj.CRS``, or ``None`` if the header carries none.
+
+        Raises:
+            LasHeaderError: the header's CRS records cannot be parsed.
+        """
+        if not self._crs_parsed:
+            try:
+                self._crs = self._native.parse_crs()
+            except Exception as error:
+                raise LasHeaderError(f'LAS CRS could not be parsed: {error}') from error
+            self._crs_parsed = True
         return self._crs
 
     @property
@@ -229,27 +262,6 @@ class LasHeader:
             return value
         return fma(float(value), scale, offset)
 
-    def pdal_header(self, dimensions):
-        """Header whose ExtraBytes match a PDAL structured array's dtype.
-
-        Replaces the extra dimensions with those in ``dimensions`` (a numpy
-        dtype or dtype-like) that are not standard LAS fields, using PDAL's
-        naming for scan angle, scanner channel and NIR.
-        """
-        native = self.native_copy()
-        replacements = {'scan_angle': 'ScanAngleRank', 'scan_angle_rank': 'ScanAngleRank',
-                        'scanner_channel': 'ScanChannel', 'nir': 'Infrared'}
-        standard = {re.sub(r'[^a-zA-Z0-9]', '', replacements.get(name, name)).lower()
-                    for name in native.point_format.standard_dimension_names}
-        native.remove_extra_dims(tuple(native.point_format.extra_dimension_names))
-        dtype = np.dtype(dimensions)
-        native.add_extra_dims([
-            laspy.ExtraBytesParams(name=name, type=dtype[name])
-            for name in dtype.names
-            if re.sub(r'[^a-zA-Z0-9]', '', name).lower() not in standard
-        ])
-        return LasHeader(native)
-
     def raw_compatible(self, other):
         """True if records of ``other`` can be written unchanged under this header.
 
@@ -299,61 +311,3 @@ class LasHeader:
         limits = np.iinfo(np.int32)
         if np.any(encoded < limits.min) or np.any(encoded > limits.max):
             raise LasHeaderError('Coordinates exceed the signed int32 range of the output encoding.')
-
-
-def pdal_writer_options(header):
-    """Convert a header into ``pdal.Writer.las`` keyword options.
-
-    Carries version, point format, scales/offsets, CRS, file identifiers, creation
-    date and non-projection VLRs/EVLRs; ``extra_dims='all'`` lets PDAL derive
-    ExtraBytes from the pipeline's points. Performs no I/O.
-
-    Example::
-
-        import pdal
-        writer = pdal.Writer.las(filename='out.laz', **pdal_writer_options(header))
-
-    Raises:
-        LasHeaderError: unsupported LAS version, waveform format or invalid encoding.
-    """
-    native = LasHeader(header).native_copy()
-    if native.version.major != 1 or native.version.minor not in (1, 2, 3, 4):
-        raise LasHeaderError('PDAL LAS output requires LAS version 1.1 through 1.4.')
-    if native.point_format.id in (4, 5, 9, 10):
-        raise LasHeaderError('PDAL LAS output does not support waveform point formats.')
-    if (not np.isfinite(native.scales).all() or np.any(native.scales <= 0)
-            or not np.isfinite(native.offsets).all()):
-        raise LasHeaderError('Coordinate encoding requires positive finite scales and finite offsets.')
-    options = {
-        'minor_version': native.version.minor,
-        'dataformat_id': native.point_format.id,
-        'filesource_id': native.file_source_id,
-        'global_encoding': native.global_encoding.value,
-        'project_id': str(native.uuid),
-        'system_id': native.system_identifier,
-        'software_id': native.generating_software,
-        'extra_dims': 'all',
-    }
-    for index, axis in enumerate(('x', 'y', 'z')):
-        options[f'scale_{axis}'] = float(native.scales[index])
-        options[f'offset_{axis}'] = float(native.offsets[index])
-    crs = native.parse_crs()
-    if crs is not None:
-        options['a_srs'] = crs.to_wkt()
-    if native.creation_date is not None:
-        options['creation_year'] = native.creation_date.year
-        options['creation_doy'] = native.creation_date.timetuple().tm_yday
-    vlrs = []
-    for extended, entries in ((False, native.vlrs), (True, native.evlrs or ())):
-        for entry in entries:
-            if (entry.user_id in ('LASF_Projection', 'liblas', 'laszip encoded')
-                    or (entry.user_id == 'LASF_Spec' and entry.record_id == 4)):
-                continue
-            vlrs.append({
-                'user_id': entry.user_id, 'record_id': entry.record_id,
-                'description': entry.description, 'evlr': extended,
-                'data': base64.b64encode(entry.record_data_bytes()).decode('ascii'),
-            })
-    if vlrs:
-        options['vlrs'] = vlrs
-    return options

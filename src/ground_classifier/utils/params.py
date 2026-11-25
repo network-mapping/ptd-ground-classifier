@@ -15,6 +15,7 @@ from typing import Any, Callable, ClassVar
 
 from .. import fast_ground
 from ..feature_codes import FeatureCodes
+from ..las import UNIT_OPTION_NAMES, UNITS_AUTO, parse_units_option
 from .helpers import normalize_path
 
 DEFAULT_LOW_VEG_MAX = 0.50
@@ -84,9 +85,10 @@ class InputParam:
 
     units: str = _field(
         "auto",
-        "Coordinate unit of the files: auto, usft or metres. 'auto' reads each file's own CRS metadata and only "
-        "proceeds when the unit is unambiguous; the tool refuses to guess rather than silently corrupt output. If a "
-        "file has no CRS metadata (common - many production LAS files omit it), set usft or metres explicitly.",
+        "Coordinate unit of the files: auto, metres, usft (US survey feet) or foot (international feet). 'auto' "
+        "reads the unit from the files' CRS, which every file must carry, be projected and share; the tool refuses "
+        "to guess rather than silently corrupt output. If the files have no CRS (common - many production LAS "
+        "files omit it) or you want to override it, state the unit explicitly.",
     )
 
     neighbour_halo: float = _field(
@@ -96,13 +98,14 @@ class InputParam:
     )
 
     def __post_init__(self):
-        units = str(self.units).strip().lower()
-        self.units = "metres" if units == "meters" else units
-        if self.units not in ("auto", "usft", "metres"):
+        try:
+            unit = parse_units_option(self.units)
+        except ValueError:
             raise SystemExit(
-                f"{self.SECTION}.units must be 'auto', 'usft' or "
-                f"'metres' (got {self.units!r})"
-            )
+                f"{self.SECTION}.units must be 'auto', 'metres', 'usft' or "
+                f"'foot' (got {self.units!r})"
+            ) from None
+        self.units = UNITS_AUTO if unit is None else UNIT_OPTION_NAMES[unit]
         self.neighbour_halo = _number("neighbour_halo", self.neighbour_halo)
 
 

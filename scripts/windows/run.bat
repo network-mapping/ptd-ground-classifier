@@ -1,5 +1,5 @@
 @echo off
-rem Usage: run.bat <files or folders> [--output-dir DIR] [--units usft^|metres] ...
+rem Usage: run.bat <files or folders> [--output-dir DIR] [--units usft^|foot^|metres] ...
 setlocal
 cd /d "%~dp0\..\.."
 if not exist .venv\Scripts\ground-classify.exe (
