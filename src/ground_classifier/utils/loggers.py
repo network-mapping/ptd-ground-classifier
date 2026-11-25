@@ -8,6 +8,9 @@ import threading
 _LOG_STATE = threading.local()
 _PRINT_LOCK = threading.Lock()
 
+# Log how long the read, each window's classification and the write take.
+PERFORMANCE_STAGE_TIMINGS = True
+
 
 def log(message: str) -> None:
     """Print atomically, or capture a complete window log in its worker."""

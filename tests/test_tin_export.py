@@ -4,8 +4,10 @@ import sys, tempfile
 from pathlib import Path
 import numpy as np
 from ground_classifier import fast_ground as fg, ply, pipeline, ptdcore, reclassify
+from ground_classifier.exports import TinExport, export_window_tin
 from ground_classifier.las import LasFile
 from ground_classifier.utils.params import RunSettings
+from ground_classifier.window_runner import classify_window_job
 
 fails = 0
 def ok(name, cond, note=""):
@@ -118,10 +120,10 @@ def main():
     ok("classify_block: appends the block's TIN to tin_out", len(tin_faces) == 1 and np.array_equal(tin_faces[0], tri) or
        (len(tin_faces) == 1 and tin_faces[0].shape == tri.shape))
     ok("classify_block: tin_out is optional (the unpacking of validate_suite.py still works)", len(reclassify.classify_block(x, y, z, cls, RunSettings())) == 3)
-    export = pipeline.TinExport(tmp / "tins", "tile", unit)
+    export = TinExport(tmp / "tins", "tile", unit)
     xmax, ymax = float(x.max()), float(y.max())
     cores = [(0.0, 0.0, 150.0, ymax), (150.0, 0.0, xmax, ymax)]
-    paths = [pipeline.export_window_tin(export, i + 1, c, tri, x, y, z, xmax, ymax) for i, c in enumerate(cores)]
+    paths = [export_window_tin(export, i + 1, c, tri, x, y, z, xmax, ymax) for i, c in enumerate(cores)]
     ok("export: one file per window, named by tile and window", [p.name for p in paths] == ["tile_w01.ply", "tile_w02.ply"])
     parts = []
     for p in paths:
@@ -134,14 +136,14 @@ def main():
        np.allclose(everything, original, atol=1e-6))
     cx = parts[0][:, :, 0].mean(axis=1); ok("export: window 1 holds only triangles whose centroid is in its core", (cx < 150.0).all() and (parts[1][:, :, 0].mean(axis=1) >= 150.0).all())
     ok("export: unit_scale is recorded in the header", any("metres per unit" in c for c in comments))
-    ok("export: no triangle in the core = no file", pipeline.export_window_tin(export, 3, (1e6, 1e6, 2e6, 2e6), tri, x, y, z, 3e6, 3e6) is None
+    ok("export: no triangle in the core = no file", export_window_tin(export, 3, (1e6, 1e6, 2e6, 2e6), tri, x, y, z, 3e6, 3e6) is None
        and not (tmp / "tins" / "tile_w03.ply").exists())
 
     # 3b. classify_window_job writes the export for its window, and leaves classification as it was
     idx = np.arange(N)
-    base = pipeline.classify_window_job(1, 1, (0.0, 0.0, xmax, ymax), idx, x, y, z, np.full(N, 2, np.uint8), xmax, ymax)
-    with_tin = pipeline.classify_window_job(1, 1, (0.0, 0.0, xmax, ymax), idx, x, y, z, np.full(N, 2, np.uint8), xmax, ymax,
-                                            tin_export=pipeline.TinExport(tmp / "job", "job", 1.0))
+    base = classify_window_job(1, 1, (0.0, 0.0, xmax, ymax), idx, x, y, z, np.full(N, 2, np.uint8), xmax, ymax, RunSettings())
+    with_tin = classify_window_job(1, 1, (0.0, 0.0, xmax, ymax), idx, x, y, z, np.full(N, 2, np.uint8), xmax, ymax, RunSettings(),
+                                   tin_export=TinExport(tmp / "job", "job", 1.0))
     ok("window job: classification is the same with or without the export",
        np.array_equal(base.classification, with_tin.classification) and np.array_equal(base.hag, with_tin.hag, equal_nan=True))
     jv, jf, _ = ply.read_mesh(tmp / "job" / "job_w01.ply")
@@ -176,7 +178,7 @@ def main():
         # several windows on threads: a file split into four windows, each writing its own mesh; together they are one TIN
         pipeline.configure_run(RunSettings(block_size=150.0, tin_export_dir=tmp / "windows"))
         try:
-            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit)
+            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, input_unit_scale=unit)
         finally:
             pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.ply"))

@@ -15,6 +15,7 @@ from pathlib import Path
 from ground_classifier import cli, dtm, fast_ground, pipeline
 from ground_classifier.las import LasHeader
 from ground_classifier.tiles import halo_in_input_units, nominal_tile_size
+from ground_classifier.windows import buffered_indices_for_window, window_cores_for_extent
 from ground_classifier.utils.args import get_args
 from ground_classifier.utils.config import default_config_text, load_config
 from ground_classifier.utils.params import (
@@ -37,8 +38,8 @@ def ok(name, cond, note=""):
     fails += 0 if cond else 1
 
 
-def windows(extent=(0.0, 0.0, 300.0, 300.0), points=1000):
-    return [core for _, core in pipeline.window_cores_for_extent(*extent, points)]
+def windows(block_size, extent=(0.0, 0.0, 300.0, 300.0), points=1000):
+    return [core for _, core in window_cores_for_extent(*extent, points, block_size)]
 
 
 def main():
@@ -109,15 +110,12 @@ def main():
         ok("tiles: metres: the halo is 25 and the nominal tile 500", halo_in_input_units(25.0, 1.0) == 25.0 and nominal_tile_size(1.0) == 500.0)
         ok("tiles: a halo of 0 stays 0", halo_in_input_units(0.0, 1.0) == 0.0)
 
-        # the window layout follows the block size set for the run, not a module constant
-        pipeline.configure_run(RunSettings())
-        ok("windows: a 300 m tile is one window at the default block size", len(windows()) == 1)
-        pipeline.configure_run(RunSettings(block_size=150.0))
-        ok("windows: ... and four at a block size of 150 m", len(windows()) == 4, str(windows()))
-        pipeline.configure_run(RunSettings(block_size=150.0, block_overlap=40.0))
+        # the window layout follows the block size and overlap it is given (from the run's settings), not a module constant
+        ok("windows: a 300 m tile is one window at the default block size", len(windows(RunSettings().block_size)) == 1)
+        ok("windows: ... and four at a block size of 150 m", len(windows(RunSettings(block_size=150.0).block_size)) == 4, str(windows(150.0)))
         import numpy as np
         x = np.array([0.0, 100.0, 139.0, 141.0, 300.0]); y = np.zeros(5)
-        picked = pipeline.buffered_indices_for_window(x, y, (0.0, -1.0, 100.0, 1.0), None, None)
+        picked = buffered_indices_for_window(x, y, (0.0, -1.0, 100.0, 1.0), None, None, RunSettings(block_size=150.0, block_overlap=40.0).block_overlap)
         ok("windows: the buffer around a core is the block overlap", picked.tolist() == [0, 1, 2], str(picked.tolist()))
     finally:
         pipeline.configure_run(RunSettings())
@@ -151,7 +149,7 @@ def main():
     def in_worker(settings, name):
         bounds = LasHeader.from_file(source).extent_xy
         with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
-            pool.submit(pipeline.classify_file_worker, str(source), str(tmp / f"{name}.laz"), 1, (), bounds, bounds, settings, FEET).result()
+            pool.submit(pipeline.classify_file_worker, str(source), str(tmp / f"{name}.laz"), (), bounds, bounds, settings, FEET).result()
         return sorted((tmp / f"{name}_dtm").glob("*.tif"))
     rasters = in_worker(RunSettings(dtm_export_dir=tmp / "spawn_whole_dtm", dtm_cell=6.0), "spawn_whole")
     ok("worker: default settings: one window, so one raster", [p.name for p in rasters] == ["219000_1146000_w01.tif"], str([p.name for p in rasters]))

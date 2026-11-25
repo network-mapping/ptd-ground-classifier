@@ -8,7 +8,7 @@ import sys
 
 import numpy as np
 
-from ground_classifier import pipeline, reclassify
+from ground_classifier import pipeline, reclassify, window_runner
 from ground_classifier.utils.params import FeatureCodesParam, RunSettings
 
 fails = 0
@@ -137,7 +137,7 @@ def main():
     ok("sparse: fewer than three eligible points is InsufficientGroundSupport", isinstance(err, reclassify.InsufficientGroundSupport) and "Fewer than three" in str(err), str(err))
     err = raised(lambda: reclassify.classify_block(pts, pts * 0, pts * 0, np.full(5, 1, np.uint8), default))
     ok("sparse: ... and none at all too", isinstance(err, reclassify.InsufficientGroundSupport))
-    ok("sparse: it is a RuntimeError, as the pipeline expects", issubclass(reclassify.InsufficientGroundSupport, RuntimeError) and pipeline.InsufficientGroundSupport is reclassify.InsufficientGroundSupport)
+    ok("sparse: it is a RuntimeError, as the window runner expects", issubclass(reclassify.InsufficientGroundSupport, RuntimeError) and window_runner.InsufficientGroundSupport is reclassify.InsufficientGroundSupport)
 
     # 8. independent of the pipeline
     code = "import sys; import ground_classifier.reclassify; print('ground_classifier.pipeline' in sys.modules)"

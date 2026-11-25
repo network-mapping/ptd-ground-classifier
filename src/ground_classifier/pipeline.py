@@ -28,7 +28,6 @@ from concurrent.futures import (
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 # If a compiled library crashes the interpreter, print where it happened.
 # Module-level so spawned helper processes get it too.
@@ -38,7 +37,7 @@ except Exception:  # no usable stderr; diagnostics only, never fatal
     pass
 
 # Small batched solves gain nothing from a BLAS thread pool, and several files
-# or windows run at once; cKDTree parallelism is controlled explicitly below.
+# or windows run at once.
 for _thread_variable in (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -56,26 +55,26 @@ except ImportError as exc:
         "Install dependencies with: pip install -r requirements.txt"
     ) from exc
 
-from . import __version__, dtm, ply
+from . import __version__
+from .exports import file_exports
 from .las import (
     UNIT_LABELS,
-    UNIT_OPTION_NAMES,
     US_FEET_TO_METRES,
     LasDataset,
     LasFile,
     drop_extra_dimensions,
-    unit_for_scale,
     write_tile,
 )
 from .reclassify import (
-    InsufficientGroundSupport,
     application_code,
-    classify_block,
     reset_input_class_mask,
 )
 from .tiles import footprint_function, halo_in_input_units
-from .utils.loggers import _LOG_STATE, log
+from .utils.helpers import format_memory
+from .utils.loggers import _LOG_STATE, PERFORMANCE_STAGE_TIMINGS, log
 from .utils.params import RunSettings
+from .window_runner import SPARSE_FALLBACK_MAX_BUFFERED_POINTS, process_file_windows
+from .windows import estimate_window_memory, processing_windows, window_cores_for_extent
 
 # Written into every output header so a file shows which version made it.
 GENERATING_SOFTWARE = f"ground-classifier {__version__}"
@@ -96,66 +95,7 @@ def configure_run(settings: RunSettings) -> None:
     RUN_SETTINGS = settings
 
 
-def default_dtm_cell(unit_scale: float) -> float:
-    """1 m for a metric file, 3 ft for a feet file (in the file's own unit)."""
-    return 1.0 if abs(unit_scale - 1.0) < 1.0e-9 else 3.0
-
-
-@dataclass(frozen=True)
-class DtmExport:
-    """Where and how one file's window rasters are written."""
-
-    directory: Path
-    stem: str               # file name (without extension) of the input
-    unit_scale: float       # metres per input unit: rasters are written in the input's own unit
-    cell: float             # cell size in the input unit
-    extent: tuple[float, float, float, float]  # the file's windows together, in metres
-
-
-@dataclass(frozen=True)
-class TinExport:
-    """Where and how one file's window TINs are written."""
-
-    directory: Path
-    stem: str               # file name (without extension) of the input
-    unit_scale: float       # metres per input unit: meshes are written in the input's own unit
-    max_edge: float = 0.0   # metres; triangles with a longer edge are left out (0 = keep all)
-
-
-# Block processing: the window size and overlap are settings (the config
-# file's windows section, RunSettings.block_size and block_overlap). The
-# overlap is deliberately larger than the 60 m initial seed grid.
-# FPL performance profile.
-#
-# These control how many pieces a single tile is split into for internal
-# window-level parallelism (see processing_windows()). Actual window count
-# is always self-limited by real tile geometry via TURBO_MIN_CORE_SIZE.
-#
-# IMPORTANT: every window reprocesses a block_overlap-wide buffer on each
-# side, so the "buffered" area a window actually computes is
-# (core + 2*block_overlap)^2, not core^2. With block_overlap=80 m, a core
-# near the old 120 m floor is buffered out to ~280 m per side - about 5x its
-# own area reprocessed. That overhead was measured directly (see test notes)
-# to make small-window splits SLOWER than a single window despite running in
-# parallel, not faster. TURBO_MIN_CORE_SIZE is therefore raised well above
-# the overlap width so the buffered-to-core area ratio stays roughly <=3x.
-# This is a moderate, conservative step (up from a hard 4-window cap) rather
-# than a maximal one - true wall-clock benefit depends on real hardware and
-# should be confirmed on an actual tile before pushing further.
-TURBO_DENSE_WINDOWS = True
-TURBO_TARGET_CORE_POINTS = 120_000_000
-TURBO_MAX_INTERNAL_WINDOWS = 8
-TURBO_MIN_CORE_SIZE = 220.0
-
 OUTPUT_SUFFIX = "_AdaptiveGround"
-
-PERFORMANCE_STAGE_TIMINGS = True
-
-# A progressive TIN is undefined for fewer than three usable, non-collinear
-# points.  Such tiny/sliver tiles retain their incoming classification rather
-# than aborting an otherwise successful large batch.  The limit prevents a
-# genuine algorithm failure on a normal tile from being silently hidden.
-SPARSE_FALLBACK_MAX_BUFFERED_POINTS = 10_000
 
 # Resource-aware parallel processing. Independent input files use processes;
 # independent windows of one long file use shared-memory threads. The two
@@ -173,20 +113,18 @@ MAX_PARALLEL_FILES = 60
 # Concurrent readers while building neighbouring-tile caches. This step is
 # disk-bound and a small share of the run, so it stays at its earlier value.
 MAX_PARALLEL_HALO_READERS = 6
-# Raised from a hard 4, but deliberately matched to TURBO_MAX_INTERNAL_WINDOWS
-# (8) above rather than pushed to the full CPU budget - see the overlap-ratio
-# note there. window_workers is still clamped to the real window count for
+# Raised from a hard 4, but deliberately matched to windows.TURBO_MAX_INTERNAL_WINDOWS
+# (8) rather than pushed to the full CPU budget - see the overlap-ratio
+# note in windows.py. window_workers is still clamped to the real window count for
 # this tile, so smaller/sparser tiles are unaffected.
 MAX_PARALLEL_WINDOWS = 8
-MAX_KD_TREE_WORKERS = 6
 RAM_BUDGET_FRACTION = 0.55
 MIN_FREE_RAM_GB = 4.0
 
 # Conservative peak-memory estimates used only to decide concurrency. They do
 # not allocate memory and do not alter classification. If a block is larger
-# than the safe budget it still runs, but by itself.
-WINDOW_FIXED_MEMORY_MB = 256.0
-WINDOW_BYTES_PER_POINT = 64
+# than the safe budget it still runs, but by itself. (The per-window figures
+# are in windows.py.)
 FILE_FIXED_MEMORY_MB = 384.0
 FULL_FILE_BYTES_PER_POINT = 96
 
@@ -217,21 +155,6 @@ DENSITY_ESTIMATE_MARGIN = 1.15
 # choose between "more files at once" and "more windows at once" - it has
 # no effect on any result.
 WINDOW_THREAD_SCALING = 0.95
-
-# scipy's cKDTree query is deterministic with multiple workers. Runtime setup
-# divides the total CPU budget among active outer workers, avoiding nested
-# thread storms while still accelerating the large neighbour searches.
-KD_TREE_WORKERS = 1
-@dataclass(frozen=True)
-class WindowResult:
-    """Core-only output returned by one buffered processing window."""
-
-    number: int
-    core_indices: np.ndarray
-    classification: np.ndarray
-    hag: np.ndarray
-    model_count: int
-    messages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -300,10 +223,8 @@ HALO_CACHE_DTYPE = np.dtype(
 )
 
 
-def configure_runtime(kdtree_workers: int, prefix: str = "") -> None:
-    """Set process-local runtime limits without changing classifications."""
-    global KD_TREE_WORKERS
-    KD_TREE_WORKERS = max(1, int(kdtree_workers))
+def configure_runtime(prefix: str = "") -> None:
+    """Set the process-local log-line prefix (a worker tags its lines with its file)."""
     _LOG_STATE.prefix = prefix
 
 
@@ -395,18 +316,6 @@ def cpu_worker_budget(requested_workers: int = 0) -> int:
     return max(1, int(math.floor(logical * CPU_BUDGET_FRACTION)))
 
 
-def estimate_window_memory(point_count: int) -> int:
-    """Conservative peak working-memory estimate for one buffered window."""
-    return int(
-        WINDOW_FIXED_MEMORY_MB * 1024**2
-        + max(0, int(point_count)) * WINDOW_BYTES_PER_POINT
-    )
-
-
-def format_memory(byte_count: int) -> str:
-    return f"{byte_count / 1024**3:.1f} GB"
-
-
 # Output-header policy. TerraScan and some upstream workflows may leave a
 # temporary Extra Bytes dimension named "Distance" in the input. It is not
 # required by this classifier and should not be propagated to delivery files.
@@ -414,517 +323,11 @@ def format_memory(byte_count: int) -> str:
 STRIP_OUTPUT_EXTRA_DIMENSIONS = ("Distance",)
 
 
-def processing_windows(
-    x: np.ndarray,
-    y: np.ndarray,
-) -> Iterable[tuple[int, tuple[float, float, float, float]]]:
-    """Yield non-overlapping core windows using extent AND point count."""
-    yield from window_cores_for_extent(
-        float(np.min(x)),
-        float(np.min(y)),
-        float(np.max(x)),
-        float(np.max(y)),
-        int(x.size),
-    )
-
-
-def window_cores_for_extent(
-    xmin: float,
-    ymin: float,
-    xmax: float,
-    ymax: float,
-    point_count: int,
-) -> Iterable[tuple[int, tuple[float, float, float, float]]]:
-    """The window layout itself, from an XY extent (metres) and point count.
-
-    Separated from processing_windows() only so the scheduler can ask what
-    layout a file WILL get from its header, before the file is read. The
-    layout rules below are unchanged.
-    """
-    width = max(xmax - xmin, 1.0e-9)
-    height = max(ymax - ymin, 1.0e-9)
-
-    physical_nx = max(1, int(math.ceil(width / RUN_SETTINGS.block_size)))
-    physical_ny = max(1, int(math.ceil(height / RUN_SETTINGS.block_size)))
-    physical_windows = physical_nx * physical_ny
-
-    point_windows = (
-        max(
-            1,
-            int(math.ceil(
-                point_count / max(TURBO_TARGET_CORE_POINTS, 1)
-            )),
-        )
-        if TURBO_DENSE_WINDOWS
-        else 1
-    )
-    desired_windows = min(
-        max(physical_windows, point_windows),
-        TURBO_MAX_INTERNAL_WINDOWS,
-    )
-
-    if desired_windows <= 1:
-        yield 1, (xmin, ymin, xmax, ymax)
-        return
-
-    aspect = width / max(height, 1.0e-9)
-    nx = max(
-        physical_nx,
-        int(math.ceil(math.sqrt(desired_windows * aspect))),
-    )
-    ny = max(
-        physical_ny,
-        int(math.ceil(desired_windows / max(nx, 1))),
-    )
-
-    while nx > physical_nx and width / nx < TURBO_MIN_CORE_SIZE:
-        nx -= 1
-    while ny > physical_ny and height / ny < TURBO_MIN_CORE_SIZE:
-        ny -= 1
-
-    while (
-        nx * ny < desired_windows
-        and nx * ny < TURBO_MAX_INTERNAL_WINDOWS
-    ):
-        can_x = width / (nx + 1) >= TURBO_MIN_CORE_SIZE
-        can_y = height / (ny + 1) >= TURBO_MIN_CORE_SIZE
-        if can_x and (not can_y or width / nx >= height / ny):
-            nx += 1
-        elif can_y:
-            ny += 1
-        else:
-            break
-
-    x_step = width / nx
-    y_step = height / ny
-    number = 0
-
-    for iy in range(ny):
-        core_ymin = ymin + iy * y_step
-        core_ymax = (
-            ymax if iy == ny - 1
-            else ymin + (iy + 1) * y_step
-        )
-        for ix in range(nx):
-            core_xmin = xmin + ix * x_step
-            core_xmax = (
-                xmax if ix == nx - 1
-                else xmin + (ix + 1) * x_step
-            )
-            number += 1
-            yield number, (
-                core_xmin,
-                core_ymin,
-                core_xmax,
-                core_ymax,
-            )
-
-
-def buffered_indices_for_window(
-    x: np.ndarray,
-    y: np.ndarray,
-    core: tuple[float, float, float, float],
-    x_order: np.ndarray | None,
-    sorted_x: np.ndarray | None,
-) -> np.ndarray:
-    """Return stable source-order indices for one overlap-buffered window."""
-    cxmin, cymin, cxmax, cymax = core
-    overlap = RUN_SETTINGS.block_overlap
-    bxmin = cxmin - overlap
-    bymin = cymin - overlap
-    bxmax = cxmax + overlap
-    bymax = cymax + overlap
-
-    if x_order is None or sorted_x is None:
-        return np.flatnonzero(
-            (x >= bxmin)
-            & (x <= bxmax)
-            & (y >= bymin)
-            & (y <= bymax)
-        )
-
-    left = np.searchsorted(sorted_x, bxmin, side="left")
-    right = np.searchsorted(sorted_x, bxmax, side="right")
-    x_candidates = x_order[left:right]
-    return np.sort(
-        x_candidates[
-            (y[x_candidates] >= bymin)
-            & (y[x_candidates] <= bymax)
-        ]
-    )
-
-
-def core_point_mask(
-    px: np.ndarray,
-    py: np.ndarray,
-    core: tuple[float, float, float, float],
-    overall_xmax: float,
-    overall_ymax: float,
-) -> np.ndarray:
-    """Which of the positions lie in the window's core. Cores are half-open
-    (lower edge in, upper edge out) except at the file's own upper edge, so
-    every position belongs to exactly one window."""
-    cxmin, cymin, cxmax, cymax = core
-    x_upper = px <= cxmax if cxmax >= overall_xmax else px < cxmax
-    y_upper = py <= cymax if cymax >= overall_ymax else py < cymax
-    return (px >= cxmin) & x_upper & (py >= cymin) & y_upper
-
-
-def export_window_tin(
-    export: TinExport,
-    window_number: int,
-    core: tuple[float, float, float, float],
-    faces: np.ndarray,
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    overall_xmax: float,
-    overall_ymax: float,
-) -> Path | None:
-    """Write the part of a window's TIN that lies in its core as a PLY mesh.
-
-    faces index x, y, z (the window's points, in metres). A triangle belongs
-    to the window whose core holds its centroid, so neighbouring windows
-    write each triangle once and no vertex is added at the boundary. The
-    mesh is written in the input's own unit. Returns the path, or None if
-    no triangle is left.
-    """
-    if faces.size:
-        centre_x = x[faces].mean(axis=1)
-        centre_y = y[faces].mean(axis=1)
-        faces = faces[
-            core_point_mask(centre_x, centre_y, core, overall_xmax, overall_ymax)
-        ]
-    if not faces.size:
-        return None
-    scale = export.unit_scale
-    xyz = np.column_stack((x / scale, y / scale, z / scale))
-    export.directory.mkdir(parents=True, exist_ok=True)
-    path = export.directory / f"{export.stem}_w{window_number:02d}.ply"
-    ply.write_mesh(
-        path,
-        xyz,
-        faces,
-        (
-            f"ground-classifier {__version__} TIN of {export.stem}, window {window_number}",
-            "triangles whose centroid is in the window core; surface vertices only",
-            f"coordinates in the input unit ({scale:.10g} metres per unit)",
-        ),
-    )
-    return path
-
-
-def export_window_dtm(
-    export: DtmExport,
-    window_number: int,
-    core: tuple[float, float, float, float],
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    ground: np.ndarray,
-) -> Path | None:
-    """Write the ground raster of a window's core: the lowest ground point
-    (final ground class) of each cell, nodata where a cell has none.
-
-    x, y, z are the window's points in metres and ground flags the ground
-    ones. The raster is written in the input's own unit on a grid fixed to
-    the coordinates (see dtm.py). A cell belongs to the window whose core
-    holds its centre, so windows write no cell twice; the cell's points
-    come from the whole buffered window. Returns the path, or None if the
-    core has no ground point.
-    """
-    scale = export.unit_scale
-    # Back to the file's unit. Rounding removes the error of the round trip
-    # through metres, which could put a point on a cell edge in the next cell.
-    gx, gy, gz = (np.round(v[ground] / scale, 6) for v in (x, y, z))
-    xmin, ymin, xmax, ymax = export.extent
-    cxmin, cymin, cxmax, cymax = core
-    cells = dtm.owned_cells(
-        tuple(c / scale for c in core),
-        export.cell,
-        first_x=cxmin <= xmin,
-        first_y=cymin <= ymin,
-        last_x=cxmax >= xmax,
-        last_y=cymax >= ymax,
-    )
-    grid = dtm.lowest_ground(gx, gy, gz, export.cell, cells)
-    if not (grid != dtm.NODATA).any():
-        return None
-    export.directory.mkdir(parents=True, exist_ok=True)
-    path = export.directory / f"{export.stem}_w{window_number:02d}.tif"
-    dtm.write_dtm(
-        path,
-        grid,
-        cells,
-        export.cell,
-        UNIT_OPTION_NAMES[unit_for_scale(scale)],
-        (
-            f"ground-classifier {__version__} DTM of {export.stem}, window {window_number}",
-            "lowest ground point of each cell; cells owned by this window's core",
-        ),
-    )
-    return path
-
-
-def classify_window_job(
-    window_number: int,
-    window_count: int,
-    core: tuple[float, float, float, float],
-    buffered_indices: np.ndarray,
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    classification_in: np.ndarray,
-    overall_xmax: float,
-    overall_ymax: float,
-    allow_sparse_fallback: bool = False,
-    tin_export: TinExport | None = None,
-    dtm_export: DtmExport | None = None,
-) -> WindowResult:
-    """Classify one window and return only its non-overlapping core."""
-    messages: list[str] = []
-    previous_buffer = getattr(_LOG_STATE, "buffer", None)
-    _LOG_STATE.buffer = messages
-    try:
-        log(
-            f"  Window {window_number}/{window_count}: "
-            f"{buffered_indices.size:,} buffered points"
-        )
-        local_x = x[buffered_indices]
-        local_y = y[buffered_indices]
-        local_z = z[buffered_indices]
-        local_input_class = classification_in[buffered_indices]
-
-        core_local = core_point_mask(
-            local_x, local_y, core, overall_xmax, overall_ymax
-        )
-
-        try:
-            block_started = time.perf_counter()
-            faces: list[np.ndarray] = []
-            local_class, local_hag, model = classify_block(
-                local_x, local_y, local_z, local_input_class,
-                RUN_SETTINGS,
-                faces if tin_export is not None else None,
-                tin_export.max_edge if tin_export is not None else 0.0,
-            )
-            if PERFORMANCE_STAGE_TIMINGS:
-                log(
-                    "      TIMING classify_block: "
-                    f"{time.perf_counter() - block_started:.1f} s"
-                )
-        except InsufficientGroundSupport as exc:
-            # allow_sparse_fallback (from the caller) reflects whether the
-            # WHOLE FILE is small. A window inside an otherwise large, dense
-            # file can still legitimately end up with very few or zero
-            # points - an irregular tile boundary, a coverage void, or the
-            # windowing grid splitting awkwardly relative to the real data
-            # extent - and that is exactly what this exception means: not
-            # enough geometry for a TIN, nothing pathological. Falling back
-            # here for a tiny/empty WINDOW specifically (regardless of the
-            # file's overall size) turns that into a graceful "keep this
-            # sliver's original classification" instead of aborting every
-            # other file still queued in the batch.
-            window_is_sparse = (
-                buffered_indices.size <= SPARSE_FALLBACK_MAX_BUFFERED_POINTS
-            )
-            if not (allow_sparse_fallback or window_is_sparse):
-                raise
-            log(
-                "      Sparse-window fallback: insufficient geometry for "
-                f"a TIN in this window ({exc}). Original classes "
-                "preserved for this window only; HAG is unavailable here."
-            )
-            return WindowResult(
-                window_number,
-                buffered_indices[core_local].copy(),
-                local_input_class[core_local].copy(),
-                np.full(
-                    int(np.count_nonzero(core_local)),
-                    np.nan,
-                    dtype=np.float32,
-                ),
-                0,
-                tuple(messages),
-            )
-        log(f"      Final TIN model points: {model.size:,}")
-        if dtm_export is not None:
-            dtm_path = export_window_dtm(
-                dtm_export, window_number, core,
-                local_x, local_y, local_z,
-                local_class == application_code(RUN_SETTINGS.feature_codes, "ground"),
-            )
-            log(
-                f"      DTM written: {dtm_path}"
-                if dtm_path else "      DTM: no ground points in this core"
-            )
-        if tin_export is not None:
-            tin_path = export_window_tin(
-                tin_export, window_number, core, faces[0],
-                local_x, local_y, local_z, overall_xmax, overall_ymax,
-            )
-            log(
-                f"      TIN written: {tin_path}"
-                if tin_path else "      TIN: no triangles in this core"
-            )
-        return WindowResult(
-            window_number,
-            buffered_indices[core_local].copy(),
-            local_class[core_local].copy(),
-            local_hag[core_local].copy(),
-            int(model.size),
-            tuple(messages),
-        )
-    except Exception as exc:
-        detail = "\n".join(messages)
-        raise RuntimeError(
-            f"Window {window_number}/{window_count} failed.\n{detail}\n"
-            f"Cause: {type(exc).__name__}: {exc}"
-        ) from exc
-    finally:
-        if previous_buffer is None:
-            delattr(_LOG_STATE, "buffer")
-        else:
-            _LOG_STATE.buffer = previous_buffer
-
-
-def apply_window_result(
-    result: WindowResult,
-    classification_out: np.ndarray,
-    hag_out: np.ndarray,
-) -> None:
-    for message in result.messages:
-        log(message)
-    classification_out[result.core_indices] = result.classification
-    hag_out[result.core_indices] = result.hag
-
-
-def process_file_windows(
-    windows: list[tuple[int, tuple[float, float, float, float]]],
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    classification_in: np.ndarray,
-    classification_out: np.ndarray,
-    hag_out: np.ndarray,
-    requested_workers: int,
-    memory_budget: int,
-    core_maxima: tuple[float, float] | None = None,
-    allow_sparse_fallback: bool = False,
-    tin_export: TinExport | None = None,
-    dtm_export: DtmExport | None = None,
-) -> None:
-    """Process windows sequentially or with bounded shared-memory workers."""
-    window_count = len(windows)
-    if core_maxima is None:
-        overall_xmax = float(np.max(x))
-        overall_ymax = float(np.max(y))
-    else:
-        overall_xmax, overall_ymax = core_maxima
-
-    # Avoid an O(points * windows) full-cloud mask scan on long corridors.
-    # Stable X sorting and final source-order sorting keep results deterministic.
-    if window_count > 1:
-        x_order = np.argsort(x, kind="stable")
-        sorted_x = x[x_order]
-    else:
-        x_order = None
-        sorted_x = None
-
-    workers = max(1, min(requested_workers, window_count))
-    if workers == 1:
-        for window_number, core in windows:
-            buffered_indices = buffered_indices_for_window(
-                x, y, core, x_order, sorted_x
-            )
-            result = classify_window_job(
-                window_number,
-                window_count,
-                core,
-                buffered_indices,
-                x,
-                y,
-                z,
-                classification_in,
-                overall_xmax,
-                overall_ymax,
-                allow_sparse_fallback,
-                tin_export,
-                dtm_export,
-            )
-            apply_window_result(result, classification_out, hag_out)
-        return
-
-    log(
-        f"Parallel windows: up to {workers}; guarded working-memory "
-        f"budget {format_memory(memory_budget)}"
-    )
-    pending: dict[object, int] = {}
-    in_flight_memory = 0
-
-    def collect_one_or_more() -> None:
-        nonlocal in_flight_memory
-        completed, _ = wait(
-            tuple(pending),
-            return_when=FIRST_COMPLETED,
-        )
-        for future in completed:
-            estimate = pending.pop(future)
-            in_flight_memory -= estimate
-            result = future.result()
-            apply_window_result(result, classification_out, hag_out)
-
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        thread_name_prefix="ground-window",
-    ) as executor:
-        for window_number, core in windows:
-            buffered_indices = buffered_indices_for_window(
-                x, y, core, x_order, sorted_x
-            )
-            estimate = estimate_window_memory(buffered_indices.size)
-            while pending and (
-                len(pending) >= workers
-                or in_flight_memory + estimate > memory_budget
-            ):
-                collect_one_or_more()
-
-            # A single oversized window is permitted, but no peer window runs
-            # beside it. This preserves the existing ability to process it.
-            if estimate > memory_budget:
-                log(
-                    f"  Window {window_number} exceeds the parallel RAM "
-                    "budget; running it alone."
-                )
-            future = executor.submit(
-                classify_window_job,
-                window_number,
-                window_count,
-                core,
-                buffered_indices,
-                x,
-                y,
-                z,
-                classification_in,
-                overall_xmax,
-                overall_ymax,
-                allow_sparse_fallback,
-                tin_export,
-                dtm_export,
-            )
-            pending[future] = estimate
-            in_flight_memory += estimate
-
-        while pending:
-            collect_one_or_more()
-
-
 def classify_file(
     source: LasFile,
     output_path: Path,
     window_workers: int = 1,
     memory_budget: int | None = None,
-    kdtree_workers: int = 1,
     neighbour_caches: tuple[HaloCacheInfo, ...] = (),
     target_bounds: tuple[float, float, float, float] | None = None,
     neighbour_bounds: tuple[float, float, float, float] | None = None,
@@ -1037,24 +440,13 @@ def classify_file(
     classification_out[reset_global] = application_code(RUN_SETTINGS.feature_codes, "unclassified")
     hag_out = np.full(x.size, np.nan, dtype=np.float32)
 
-    windows = list(processing_windows(target_x, target_y))
+    windows = list(processing_windows(target_x, target_y, RUN_SETTINGS.block_size))
     log(
         f"Target points: {target_point_count:,}; context points: "
         f"{x.size - target_point_count:,}; processing window(s): "
         f"{len(windows)}"
     )
     actual_window_workers = max(1, min(window_workers, len(windows)))
-    tree_workers_per_window = max(
-        1,
-        min(
-            MAX_KD_TREE_WORKERS,
-            kdtree_workers // actual_window_workers,
-        ),
-    )
-    configure_runtime(
-        tree_workers_per_window,
-        getattr(_LOG_STATE, "prefix", ""),
-    )
     if memory_budget is None:
         memory_budget = safe_parallel_memory_budget()
     else:
@@ -1063,28 +455,8 @@ def classify_file(
             memory_budget,
             safe_parallel_memory_budget(),
         )
-    tin_export = (
-        TinExport(
-            RUN_SETTINGS.tin_export_dir, input_path.stem, unit_scale, RUN_SETTINGS.tin_max_edge
-        )
-        if RUN_SETTINGS.tin_export_dir is not None
-        else None
-    )
-    dtm_export = (
-        DtmExport(
-            RUN_SETTINGS.dtm_export_dir,
-            input_path.stem,
-            unit_scale,
-            RUN_SETTINGS.dtm_cell or default_dtm_cell(unit_scale),
-            (
-                min(core[0] for _, core in windows),
-                min(core[1] for _, core in windows),
-                max(core[2] for _, core in windows),
-                max(core[3] for _, core in windows),
-            ),
-        )
-        if RUN_SETTINGS.dtm_export_dir is not None
-        else None
+    tin_export, dtm_export = file_exports(
+        RUN_SETTINGS, input_path.stem, unit_scale, [core for _, core in windows]
     )
     processing_started = time.perf_counter()
     process_file_windows(
@@ -1097,6 +469,7 @@ def classify_file(
         hag_out,
         actual_window_workers,
         memory_budget,
+        RUN_SETTINGS,
         (target_bounds[2] * unit_scale, target_bounds[3] * unit_scale),
         target_point_count <= SPARSE_FALLBACK_MAX_BUFFERED_POINTS,
         tin_export,
@@ -1631,6 +1004,7 @@ def estimate_target_memory(
                 bxmax * unit_scale,
                 bymax * unit_scale,
                 point_count,
+                RUN_SETTINGS.block_size,
             )
         ]
         window_count = max(1, len(cores))
@@ -1786,7 +1160,6 @@ def plan_file_parallelism(
 def classify_file_worker(
     input_path_text: str,
     output_path_text: str,
-    cpu_slots: int,
     neighbour_caches: tuple[HaloCacheInfo, ...],
     target_bounds: tuple[float, float, float, float],
     neighbour_bounds: tuple[float, float, float, float],
@@ -1802,14 +1175,13 @@ def classify_file_worker(
     mechanism a single file run in the main process has always used.
     """
     input_path = Path(input_path_text)
-    configure_runtime(cpu_slots, f"[{input_path.stem}] ")
+    configure_runtime(f"[{input_path.stem}] ")
     configure_run(settings)
     return classify_file(
         LasFile.from_file(input_path),
         Path(output_path_text),
         window_workers=max(1, int(window_workers)),
         memory_budget=window_memory_budget,
-        kdtree_workers=cpu_slots,
         neighbour_caches=neighbour_caches,
         target_bounds=target_bounds,
         neighbour_bounds=neighbour_bounds,
@@ -2053,14 +1425,13 @@ def run_batch(
                 else 1
             )
             for input_path, output_path in task_list:
-                configure_runtime(cpu_budget)
+                configure_runtime()
                 try:
                     results[input_path] = classify_file(
                         dataset.file(input_path),
                         output_path,
                         window_workers=window_workers,
                         memory_budget=memory_budget,
-                        kdtree_workers=cpu_budget,
                         neighbour_caches=target_caches[input_path],
                         target_bounds=dataset.file(input_path).header.extent_xy,
                         neighbour_bounds=neighbour_bounds_by_path[input_path],
@@ -2158,7 +1529,7 @@ def run_batch(
                         and len(in_flight) < most
                     ):
                         input_path, output_path = waiting[next_position]
-                        files, threads, exclusive = run_plans[input_path]
+                        _, threads, exclusive = run_plans[input_path]
                         estimate = run_cost(input_path)
                         # A file always starts when nothing else is running
                         # (an oversized file still runs, by itself). Beside
@@ -2187,14 +1558,6 @@ def run_batch(
                                 classify_file_worker,
                                 str(input_path),
                                 str(output_path),
-                                # CPU slots for this file: its share of the
-                                # budget, split between its windows inside
-                                # classify_file for neighbour searches.
-                                (
-                                    cpu_budget
-                                    if exclusive
-                                    else max(threads, cpu_budget // files)
-                                ),
                                 target_caches[input_path],
                                 dataset.file(input_path).header.extent_xy,
                                 neighbour_bounds_by_path[input_path],

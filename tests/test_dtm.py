@@ -4,6 +4,7 @@ import sys, tempfile, shutil
 from pathlib import Path
 import numpy as np
 from ground_classifier import dtm, pipeline
+from ground_classifier.exports import DtmExport, default_dtm_cell, export_window_dtm
 from ground_classifier.las import LasFile
 from ground_classifier.utils.params import RunSettings
 
@@ -93,9 +94,9 @@ def main():
     mx, my, mz = fx * unit_scale, fy * unit_scale, fz * unit_scale           # the pipeline works in metres
     extent = (mx.min(), my.min(), mx.max(), my.max())
     split = (extent[0] + extent[2]) / 2 + 0.123
-    export = pipeline.DtmExport(tmp / "dtm", "tile", unit_scale, 3.0, extent)
-    w1 = pipeline.export_window_dtm(export, 1, (extent[0], extent[1], split, extent[3]), mx, my, mz, ground)
-    w2 = pipeline.export_window_dtm(export, 2, (split, extent[1], extent[2], extent[3]), mx, my, mz, ground)
+    export = DtmExport(tmp / "dtm", "tile", unit_scale, 3.0, extent)
+    w1 = export_window_dtm(export, 1, (extent[0], extent[1], split, extent[3]), mx, my, mz, ground)
+    w2 = export_window_dtm(export, 2, (split, extent[1], extent[2], extent[3]), mx, my, mz, ground)
     ok("export: one raster per window, named by tile and window", [p.name for p in (w1, w2)] == ["tile_w01.tif", "tile_w02.tif"])
     g1, c1, _, u1, _ = dtm.read_dtm(w1); g2, c2, _, _, _ = dtm.read_dtm(w2)
     ok("export: in the input's unit (usft), on a grid fixed to the coordinates", u1 == "usft" and c1[2:] == c2[2:] and c2[0] == c1[1] + 1)
@@ -106,12 +107,12 @@ def main():
        f"{int((both != expected).sum())} cells differ of {both.size:,}")
     ok("export: the file's outermost cells are written too (every ground point has a cell)",
        int((both != dtm.NODATA).sum()) == len({(int(a // 3), int(b // 3)) for a, b in zip(fx[ground], fy[ground])}))
-    ok("export: no ground point in the core = no file", pipeline.export_window_dtm(export, 3, (extent[0], extent[1], split, extent[3]), mx, my, mz, np.zeros(n, bool)) is None
+    ok("export: no ground point in the core = no file", export_window_dtm(export, 3, (extent[0], extent[1], split, extent[3]), mx, my, mz, np.zeros(n, bool)) is None
        and not (tmp / "dtm" / "tile_w03.tif").exists())
-    ok("export: the default cell is 1 m for metres and 3 ft for feet", pipeline.default_dtm_cell(1.0) == 1.0 and pipeline.default_dtm_cell(unit_scale) == 3.0)
+    ok("export: the default cell is 1 m for metres and 3 ft for feet", default_dtm_cell(1.0) == 1.0 and default_dtm_cell(unit_scale) == 3.0)
     # a point whose feet value is exactly a cell edge must land in the cell that starts there
-    edge_export = pipeline.DtmExport(tmp / "edge", "edge", unit_scale, 3.0, (0.0, 0.0, 400.0, 400.0))
-    p = pipeline.export_window_dtm(edge_export, 1, (0.0, 0.0, 400.0, 400.0), np.array([300.0 * unit_scale]), np.array([6.0 * unit_scale]), np.array([50.0 * unit_scale]), np.array([True]))
+    edge_export = DtmExport(tmp / "edge", "edge", unit_scale, 3.0, (0.0, 0.0, 400.0, 400.0))
+    p = export_window_dtm(edge_export, 1, (0.0, 0.0, 400.0, 400.0), np.array([300.0 * unit_scale]), np.array([6.0 * unit_scale]), np.array([50.0 * unit_scale]), np.array([True]))
     ge, ce = dtm.read_dtm(p)[:2]
     found = np.argwhere(ge != dtm.NODATA)
     ok("export: the round trip through metres does not move an edge point into the cell before",
@@ -149,7 +150,7 @@ def main():
         # several windows on threads: each window writes its own raster, with no cell in two of them
         pipeline.configure_run(RunSettings(block_size=150.0, dtm_export_dir=tmp / "windows"))
         try:
-            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit_scale)
+            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, input_unit_scale=unit_scale)
         finally:
             pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.tif"))

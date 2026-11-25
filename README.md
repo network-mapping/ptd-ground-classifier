@@ -7,7 +7,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `tiles` (the tile-name footprints neighbours are found with), `reclassify` (how a block of points gets its class codes: the engine's ground, HAG bands, noise), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `las` (the set of LAS/LAZ files a run works on, `LasDataset`: its members, their neighbours in the same folders, and the run's units, from the CRS or stated; and reading and writing them; the only place the classify path touches laspy), `utils` (command line, run configuration, logging: see its README), `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `tiles` (the tile-name footprints neighbours are found with), `windows` (how a tile is cut into windows: cores, buffers, ownership of points), `window_runner` (classifying a file's windows, in order or on threads), `exports` (per-window TIN and DTM files), `reclassify` (how a block of points gets its class codes: the engine's ground, HAG bands, noise), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `las` (the set of LAS/LAZ files a run works on, `LasDataset`: its members, their neighbours in the same folders, and the run's units, from the CRS or stated; and reading and writing them; the only place the classify path touches laspy), `utils` (command line, run configuration, logging: see its README), `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `ground_classifier_config.yml`: the settings (sections `input`, `performance`, `dtm`, `hag`, `engine`) |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |
@@ -40,6 +40,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make settings` | `RunSettings` and the `windows` section: defaults, pickling, how the pipeline applies them, and that a spawned worker receives them. |
 | `make reclassify` | The reclassification module: which classes are re-labelled, the HAG bands and output codes, and that everything comes from the arguments. |
 | `make neighbours` | Which tiles are neighbours of which (`LasDataset.neighbours` with the tile-name footprints of `tiles`): pinned to the results of the original implementation across metric and feet grids, sparse and empty tiles. |
+| `make windows` | The window layout, buffers and cores (`windows`), the per-file exports (`exports`) and the window runner (`window_runner`): layouts and buffers pinned to the original implementation's, every point in exactly one core, threaded and sequential runs identical, sparse-window fallback. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
 All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.
