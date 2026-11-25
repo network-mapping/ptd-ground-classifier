@@ -37,6 +37,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 | `make dtmdiff` | The DTM subtraction: `dtm.subtract()` and `ground-classify dtm-diff`. |
 | `make anchor` | The temporary `--anchor-seeds` option: fixed-grid starting squares. |
 | `make las` | The `las` package: units and the override, input expansion, whole-tile read and write. |
+| `make settings` | `RunSettings` and the `windows` section: defaults, pickling, how the pipeline applies them, and that a spawned worker receives them. |
 | `make validate` | Precision, recall and F1 against TerraScan. A benchmark, not a pass/fail test. |
 
 All of them are plain scripts that need the project venv and a built core (the make targets build it); no test framework.

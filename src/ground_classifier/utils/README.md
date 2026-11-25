@@ -25,6 +25,7 @@ One YAML file; each top-level key is a section, and its keys are the fields of t
 | Section | Param class | Holds |
 | --- | --- | --- |
 | `input` | `InputParam` | `units`: `auto`, `metres`, `usft` (US survey feet) or `foot` (international feet); `meters` is accepted. `neighbour_halo`: metres of neighbouring-tile context read around each tile (default 10; 0 = none). |
+| `windows` | `WindowsParam` | `block_size`: metres; a tile larger than this is cut into windows (default 5000). `block_overlap`: metres each window reads beyond its core (default 80). Both change classifications near window edges. |
 | `performance` | `PerformanceParam` | `workers`, `ram_limit_gb`. |
 | `dtm` | `DtmParam` | `cell_size`. |
 | `hag` | `HagParam` | `low_veg_max`, `medium_veg_max`, `high_veg_max`; `bands` gives the tuple; ordering is checked. |
@@ -40,8 +41,10 @@ One YAML file; each top-level key is a section, and its keys are the fields of t
 | --- | --- | --- |
 | `path: PathParam` | CLI | `inputs`, `output`, `config` (None = built-in defaults), `export_tin`, `export_dtm`. Every path is normalised in `__post_init__` (None skipped), except `inputs`, which stay as typed because the manifest records them so. A given `config` must be a file. |
 | `options: OptionParam` | CLI | `units`, `workers`, `ram_limit_gb`, `dtm_cell`, `tin_max_edge`, `overwrite`, `anchor_seeds`, exactly as given (0 / None = not given). |
-| `input_config`, `performance_config`, `dtm_config`, `hag_config`, `engine_config` | config file | The five sections above. |
+| `input_config`, `windows_config`, `performance_config`, `dtm_config`, `hag_config`, `engine_config`, `feature_codes_config` | config file | One per section above (`feature_codes` holds the LAS classification codes). |
 | `engine_settings` | `engine_config` + CLI | The `fast_ground.Settings` that `engine_config` makes; `--anchor-seeds` is applied here. |
+
+`Config.run_settings()` builds a `RunSettings` (defined in `params.py`): the one frozen, picklable object the pipeline takes. It holds the engine settings, HAG bands, feature codes, neighbour halo, TIN and DTM export settings and the window size and overlap, merged from the config file and the command line. `pipeline.configure_run(settings)` applies it in each process, because spawned workers do not inherit the parent's module state. Tests build `RunSettings(...)` directly instead of patching pipeline constants.
 
 `Config.units`, `.workers`, `.ram_limit_gb` and `.dtm_cell` give the effective value: **a command line option, when given, wins over the config file**. `Config.as_dict()` is the `config` block of the manifest (`config_file`, then the file's values).
 
@@ -62,7 +65,7 @@ def main(argv=None):
     return classify(load_config(get_args(argv)))
 ```
 
-`main()` is the only place that calls `get_args()` / `load_config()`. `classify(config)` passes sections or fields down (`config.hag_config.bands`, `config.engine_settings`, `locations.export_tin`, ...). Downstream code does not import `utils.config`. Tests can build the dataclasses directly. `manifest.build_manifest` takes the whole `Config`.
+`main()` is the only place that calls `get_args()` / `load_config()`. `classify(config)` passes `config.run_settings()` to `pipeline.run_batch`. Downstream code does not import `utils.config`. Tests can build the dataclasses directly. `manifest.build_manifest` takes the whole `Config`.
 
 ## Logging
 

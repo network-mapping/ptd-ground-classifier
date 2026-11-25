@@ -100,6 +100,7 @@ The HAG bands are in metres (the values in `config/ground_classifier_config.yml`
 
 ## Scheduling
 
-Tiles are processed as one window up to 120 million points; files run side by side within the RAM budget
+Tiles are processed as one window up to 120 million points, and a tile wider or taller than `block_size` (5000 m by default,
+`windows` section) is cut into windows too, each read with `block_overlap` (80 m) of its neighbours; files run side by side within the RAM budget
 (the `performance` section of the config file, `--workers`, `--ram-limit-gb`). Each tile's neighbour context (10 m by default, `neighbour_halo` in the `input` section) is read
 from the other files in the same input folder.

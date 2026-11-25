@@ -82,13 +82,14 @@ def run_suite(mod, label=""):
 
 if __name__ == "__main__":
     from ground_classifier import pipeline
+    from ground_classifier.utils.params import RunSettings
     from ground_classifier.utils.args import get_args
     from ground_classifier.utils.config import load_config
 
     # Only the config folder matters here; the input argument is not read.
     config = load_config(get_args([str(CLIPS_DIR)]))
-    pipeline.configure_engine_settings(config.engine_settings)
-    pipeline.configure_hag_bands(*config.hag_config.bands)
-    pipeline.configure_feature_codes(config.feature_codes)
+    pipeline.configure_run(RunSettings(
+        engine=config.engine_settings, hag_bands=config.hag_config.bands, feature_codes=config.feature_codes,
+    ))
     pipeline.configure_runtime(kdtree_workers=1)
     run_suite(pipeline, label="ground_classifier.pipeline")

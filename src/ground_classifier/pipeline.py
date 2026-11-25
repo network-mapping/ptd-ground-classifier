@@ -63,7 +63,6 @@ except ImportError as exc:
     ) from exc
 
 from . import __version__, dtm, fast_ground, ply
-from .feature_codes import FeatureCodes
 from .las import (
     UNIT_LABELS,
     UNIT_OPTION_NAMES,
@@ -77,82 +76,70 @@ from .las import (
     write_tile,
 )
 from .utils.loggers import _LOG_STATE, log
-from .utils.params import (
-    DEFAULT_HIGH_VEG_MAX,
-    DEFAULT_LOW_VEG_MAX,
-    DEFAULT_MEDIUM_VEG_MAX,
-    FeatureCodesParam,
-)
+from .utils.params import RunSettings
 
 # Written into every output header so a file shows which version made it.
 GENERATING_SOFTWARE = f"ground-classifier {__version__}"
 
-# Settings handed to fast_ground.GroundRun (metres); set per process by
-# configure_engine_settings() because spawned helpers do not inherit them.
-FAST_ENGINE_SETTINGS = fast_ground.Settings()
+# The settings of a run live in these module globals, set in every process by
+# configure_run() because spawned helpers do not inherit them. The values
+# below are the defaults, for a caller that never configures a run.
+_DEFAULTS = RunSettings()
 
+# Settings handed to fast_ground.GroundRun (metres).
+FAST_ENGINE_SETTINGS = _DEFAULTS.engine
 
-def configure_engine_settings(settings: fast_ground.Settings) -> None:
-    global FAST_ENGINE_SETTINGS
-    FAST_ENGINE_SETTINGS = settings
 # A point the low-point filter kept out of the surface is labelled noise
 # only if it ends up at least this far below the finished ground (metres).
 FAST_ENGINE_LOW_NOISE_DEPTH = 0.5
 
+# HAG thresholds (metres), whatever the input file's own coordinate unit.
+LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX = _DEFAULTS.hag_bands
 
-
-LOW_VEG_MAX = DEFAULT_LOW_VEG_MAX
-MEDIUM_VEG_MAX = DEFAULT_MEDIUM_VEG_MAX
-HIGH_VEG_MAX = DEFAULT_HIGH_VEG_MAX
-
-def configure_hag_bands(low: float, medium: float, high: float) -> None:
-    """Set the process-local HAG thresholds. Must be re-called at the start
-    of every worker process (Windows multiprocessing spawns fresh
-    interpreters that do not inherit the parent's mutated globals) -
-    mirrors the existing configure_runtime() pattern."""
-    global LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX
-    LOW_VEG_MAX = low
-    MEDIUM_VEG_MAX = medium
-    HIGH_VEG_MAX = high
-
-# Input -> output class codes. Set per process by configure_feature_codes()
-# because spawned helpers do not inherit them.
-FEATURE_CODES = FeatureCodesParam().feature_codes()
-
-
-def configure_feature_codes(feature_codes: FeatureCodes) -> None:
-    global FEATURE_CODES
-    FEATURE_CODES = feature_codes
+# Input -> output class codes.
+FEATURE_CODES = _DEFAULTS.feature_codes
 
 
 def application_code(name: str) -> int:
     """The class code written for the feature `name` (e.g. "ground")."""
     return FEATURE_CODES("application")[name].code
 
+
 # Optional export of each window's TIN as a PLY mesh (see export_window_tin()).
-# Set per process by configure_tin_export() because spawned helpers do not
-# inherit it. None = no export; the edge limit is in metres, 0 = no limit.
-TIN_EXPORT_DIR: Path | None = None
-TIN_EXPORT_MAX_EDGE = 0.0
-
-
-def configure_tin_export(directory: Path | None, max_edge: float = 0.0) -> None:
-    global TIN_EXPORT_DIR, TIN_EXPORT_MAX_EDGE
-    TIN_EXPORT_DIR = directory
-    TIN_EXPORT_MAX_EDGE = max_edge
-
+# None = no export; the edge limit is in metres, 0 = no limit.
+TIN_EXPORT_DIR: Path | None = _DEFAULTS.tin_export_dir
+TIN_EXPORT_MAX_EDGE = _DEFAULTS.tin_max_edge
 
 # Optional export of each window's ground raster (see export_window_dtm()).
-# Set per process like the TIN export. The cell size is in the input unit;
-# 0 = the default for the file's unit (see default_dtm_cell()).
-DTM_EXPORT_DIR: Path | None = None
-DTM_CELL = 0.0
+# The cell size is in the input unit; 0 = the default for the file's unit
+# (see default_dtm_cell()).
+DTM_EXPORT_DIR: Path | None = _DEFAULTS.dtm_export_dir
+DTM_CELL = _DEFAULTS.dtm_cell
+
+# Block processing: see processing_windows() and buffered_indices_for_window().
+BLOCK_SIZE = _DEFAULTS.block_size
+BLOCK_OVERLAP = _DEFAULTS.block_overlap
 
 
-def configure_dtm_export(directory: Path | None, cell: float = 0.0) -> None:
-    global DTM_EXPORT_DIR, DTM_CELL
-    DTM_EXPORT_DIR = directory
-    DTM_CELL = cell
+def configure_run(settings: RunSettings) -> None:
+    """Apply a run's settings to this process. Must be called at the start of
+    every worker process (Windows multiprocessing spawns fresh interpreters
+    that do not inherit the parent's mutated globals) - mirrors the
+    configure_runtime() pattern. The settings that depend on the input
+    file's unit are applied by configure_input_unit()."""
+    global FAST_ENGINE_SETTINGS, LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX
+    global FEATURE_CODES, TIN_EXPORT_DIR, TIN_EXPORT_MAX_EDGE
+    global DTM_EXPORT_DIR, DTM_CELL, BLOCK_SIZE, BLOCK_OVERLAP, NEIGHBOUR_HALO_METRES
+    FAST_ENGINE_SETTINGS = settings.engine
+    LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX = settings.hag_bands
+    FEATURE_CODES = settings.feature_codes
+    TIN_EXPORT_DIR = settings.tin_export_dir
+    TIN_EXPORT_MAX_EDGE = settings.tin_max_edge
+    DTM_EXPORT_DIR = settings.dtm_export_dir
+    DTM_CELL = settings.dtm_cell
+    BLOCK_SIZE = settings.block_size
+    BLOCK_OVERLAP = settings.block_overlap
+    NEIGHBOUR_HALO_METRES = float(settings.neighbour_halo_m)
 
 
 def default_dtm_cell(unit_scale: float) -> float:
@@ -181,10 +168,9 @@ class TinExport:
     max_edge: float = 0.0   # metres; triangles with a longer edge are left out (0 = keep all)
 
 
-# Large-file block processing. The overlap is deliberately larger than the
-# 60 m initial seed grid.
-BLOCK_SIZE = 5000.0
-BLOCK_OVERLAP = 80.0
+# Block processing: the window size and overlap are settings (the config
+# file's windows section, RunSettings.block_size and block_overlap). The
+# overlap is deliberately larger than the 60 m initial seed grid.
 # FPL performance profile.
 #
 # These control how many pieces a single tile is split into for internal
@@ -214,7 +200,7 @@ PERFORMANCE_STAGE_TIMINGS = True
 # Numeric tile names such as 468500_4966000 are interpreted as the lower-left
 # corner of a nominal square tile in this build - 1500 US survey feet for a
 # feet project, 500 m for a metric project (both conventions the user
-# described directly; see configure_nominal_tile_size(), which sets the
+# described directly; see configure_input_unit(), which sets the
 # real value once the project's unit is resolved). Sparse/sliver LAS files
 # often cover only a small part of a tile; using the nominal footprint keeps
 # their 10 m-equivalent adjacent-tile context discoverable.
@@ -266,39 +252,32 @@ FULL_FILE_BYTES_PER_POINT = 96
 # halo around the target bounds. Temporary halo caches mean each neighbour
 # file is decompressed once per run rather than once for every adjacent tile.
 NEIGHBOUR_HALO = 10.0 / US_FEET_TO_METRES  # 32.808333... USft = 10 m physical.
-NEIGHBOUR_HALO_METRES = 10.0
-# Re-derived per run by configure_neighbour_halo() once the project's real
-# input unit is known (see detect_input_unit_scale) - the fixed feet value
-# above is only the pre-configuration default, kept for any direct caller
-# that never resolves a project unit.
-
-
-def configure_neighbour_halo(
-    metres_per_input_unit: float, halo_metres: float = 10.0
-) -> None:
-    """Set NEIGHBOUR_HALO to `halo_metres` (the config file's
-    input.neighbour_halo, 10 by default) expressed in the project's real
-    input unit. Must be called once the input unit is known, before any
-    neighbour-tile discovery or halo-buffered classify_file work runs, and
-    re-called at the start of any worker process that does not inherit this
-    process's mutated globals (Windows multiprocessing spawn)."""
-    global NEIGHBOUR_HALO, NEIGHBOUR_HALO_METRES
-    NEIGHBOUR_HALO_METRES = float(halo_metres)
-    NEIGHBOUR_HALO = NEIGHBOUR_HALO_METRES / max(metres_per_input_unit, 1.0e-9)
-
+NEIGHBOUR_HALO_METRES = _DEFAULTS.neighbour_halo_m
+# Re-derived per file by configure_input_unit() once the project's real
+# input unit is known (see las.LasDataset.metres_per_unit) - the fixed feet
+# value above is only the pre-configuration default, kept for any direct
+# caller that never resolves a project unit. The metres come from the
+# RunSettings (configure_run()).
 
 # Numeric tile filenames encode a project's standard tile footprint in its
 # own native unit - 1500x1500 US survey feet for a feet project, 500x500 m
 # for a metric project (both conventions described directly by the user).
 # The value below is only the pre-configuration default (feet); like
-# NEIGHBOUR_HALO, configure_nominal_tile_size() sets the real value once the
-# project's unit is known, and must be re-called in any worker process that
-# does not inherit this process's mutated globals.
+# NEIGHBOUR_HALO, configure_input_unit() sets the real value once the
+# project's unit is known.
 NOMINAL_TILE_SIZE_USFT = 1500.0
 
 
-def configure_nominal_tile_size(metres_per_input_unit: float) -> None:
-    global NOMINAL_TILE_SIZE_USFT
+def configure_input_unit(metres_per_input_unit: float) -> None:
+    """Express the unit-dependent settings in the project's real input unit:
+    the neighbour halo (NEIGHBOUR_HALO_METRES, from configure_run()) and the
+    nominal tile size. Must be called once the input unit is known, before
+    any neighbour-tile discovery or halo-buffered classify_file work runs,
+    and re-called at the start of any worker process that does not inherit
+    this process's mutated globals (Windows multiprocessing spawn), after
+    configure_run()."""
+    global NEIGHBOUR_HALO, NOMINAL_TILE_SIZE_USFT
+    NEIGHBOUR_HALO = NEIGHBOUR_HALO_METRES / max(metres_per_input_unit, 1.0e-9)
     # metres_per_input_unit == 1.0 for a metres project (native tile = 500),
     # US_FEET_TO_METRES for a feet project (native tile = 1500).
     NOMINAL_TILE_SIZE_USFT = (
@@ -550,8 +529,8 @@ def assign_hag_classes(
     hag: np.ndarray,
 ) -> None:
     """Assign the three vegetation classes from final HAG, using
-    the project's configured HAG bands (see config.load_run_config() /
-    configure_hag_bands()). HAG is always in metres regardless of the
+    the run's HAG bands (RunSettings.hag_bands, applied by
+    configure_run()). HAG is always in metres regardless of the
     input file's own coordinate unit."""
     low_code, medium_code, high_code = (
         application_code(name)
@@ -2129,17 +2108,10 @@ def classify_file_worker(
     neighbour_caches: tuple[HaloCacheInfo, ...],
     target_bounds: tuple[float, float, float, float],
     neighbour_bounds: tuple[float, float, float, float],
-    hag_bands: tuple[float, float, float],
-    engine_settings: fast_ground.Settings,
-    feature_codes: FeatureCodes,
+    settings: RunSettings,
     unit_scale: float,
     window_workers: int = 1,
     window_memory_budget: int | None = None,
-    tin_export_dir_text: str | None = None,
-    tin_max_edge: float = 0.0,
-    dtm_export_dir_text: str | None = None,
-    dtm_cell: float = 0.0,
-    neighbour_halo_m: float = 10.0,
 ) -> FileResult:
     """Top-level process target; paths avoid transferring point arrays.
 
@@ -2149,19 +2121,8 @@ def classify_file_worker(
     """
     input_path = Path(input_path_text)
     configure_runtime(cpu_slots, f"[{input_path.stem}] ")
-    configure_hag_bands(*hag_bands)
-    configure_engine_settings(engine_settings)
-    configure_feature_codes(feature_codes)
-    configure_tin_export(
-        Path(tin_export_dir_text) if tin_export_dir_text else None,
-        tin_max_edge,
-    )
-    configure_dtm_export(
-        Path(dtm_export_dir_text) if dtm_export_dir_text else None,
-        dtm_cell,
-    )
-    configure_neighbour_halo(unit_scale, neighbour_halo_m)
-    configure_nominal_tile_size(unit_scale)
+    configure_run(settings)
+    configure_input_unit(unit_scale)
     return classify_file(
         input_path,
         Path(output_path_text),
@@ -2216,16 +2177,9 @@ def run_batch(
     tasks: list[tuple[Path, Path]],
     inputs: list[Path],
     unit_scale_by_path: dict[Path, float],
-    hag_bands: tuple[float, float, float],
-    engine_settings: fast_ground.Settings,
-    feature_codes: FeatureCodes,
+    settings: RunSettings,
     requested_workers: int,
     requested_ram_limit_gb: float,
-    tin_export_dir: Path | None = None,
-    tin_max_edge: float = 0.0,
-    dtm_export_dir: Path | None = None,
-    dtm_cell: float = 0.0,
-    neighbour_halo_m: float = 10.0,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
     """Classify ``tasks`` (input, output) with the resource-aware scheduler.
 
@@ -2233,23 +2187,21 @@ def run_batch(
     taken from the same folders. Returns the per-file results, the files that
     failed, and the CPU/RAM limits the scheduler used.
     """
-    configure_hag_bands(*hag_bands)
-    configure_feature_codes(feature_codes)
+    configure_run(settings)
     # NEIGHBOUR_HALO is a single process-wide value used while discovering
     # which files are spatial neighbours of each other, before any one
     # file's classification begins - it needs one project-wide unit. All
     # files in a run are expected to share the same project/unit; the first
     # task's unit is used for this shared step, and every actual
     # classification still uses its own file's individually resolved unit.
-    configure_neighbour_halo(unit_scale_by_path[tasks[0][0]], neighbour_halo_m)
-    configure_nominal_tile_size(unit_scale_by_path[tasks[0][0]])
+    configure_input_unit(unit_scale_by_path[tasks[0][0]])
 
     unit_labels = sorted({
         UNIT_LABELS[unit_for_scale(scale)]
         for scale in unit_scale_by_path.values()
     })
     unit_summary = " and ".join(unit_labels) if unit_labels else "unknown"
-    low_veg, medium_veg, high_veg = hag_bands
+    low_veg, medium_veg, high_veg = settings.hag_bands
     low_code, medium_code, high_code = (
         application_code(name)
         for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
@@ -2269,23 +2221,20 @@ def run_batch(
         + " (see the feature_codes section of the config file)."
     )
 
-    configure_tin_export(tin_export_dir, tin_max_edge)
-    if tin_export_dir is not None:
+    if settings.tin_export_dir is not None:
         log(
-            f"TIN export: one PLY per window in {tin_export_dir}"
-            + (f", triangle edges <= {tin_max_edge:g} m" if tin_max_edge > 0 else "")
+            f"TIN export: one PLY per window in {settings.tin_export_dir}"
+            + (f", triangle edges <= {settings.tin_max_edge:g} m" if settings.tin_max_edge > 0 else "")
         )
-    configure_dtm_export(dtm_export_dir, dtm_cell)
-    if dtm_export_dir is not None:
+    if settings.dtm_export_dir is not None:
         log(
-            f"DTM export: one GeoTIFF per window in {dtm_export_dir}, cell "
+            f"DTM export: one GeoTIFF per window in {settings.dtm_export_dir}, cell "
             + (
-                f"{dtm_cell:g} (input unit)" if dtm_cell > 0
+                f"{settings.dtm_cell:g} (input unit)" if settings.dtm_cell > 0
                 else "1 m / 3 ft (default for the file's unit)"
             )
         )
-    configure_engine_settings(engine_settings)
-    changed = engine_settings.changed()
+    changed = settings.engine.changed()
     log(
         "Engine settings (metres): "
         + (
@@ -2438,8 +2387,7 @@ def run_batch(
             )
             for input_path, output_path in task_list:
                 configure_runtime(cpu_budget)
-                configure_neighbour_halo(unit_scale_by_path[input_path], neighbour_halo_m)
-                configure_nominal_tile_size(unit_scale_by_path[input_path])
+                configure_input_unit(unit_scale_by_path[input_path])
                 try:
                     results[input_path] = classify_file(
                         input_path,
@@ -2586,9 +2534,7 @@ def run_batch(
                                 target_caches[input_path],
                                 metadata_by_path[input_path].bounds,
                                 metadata_by_path[input_path].neighbour_bounds,
-                                hag_bands,
-                                engine_settings,
-                                feature_codes,
+                                settings,
                                 unit_scale_by_path[input_path],
                                 threads,
                                 (
@@ -2596,19 +2542,6 @@ def run_batch(
                                     if exclusive
                                     else threads * plan.window
                                 ),
-                                (
-                                    str(TIN_EXPORT_DIR)
-                                    if TIN_EXPORT_DIR is not None
-                                    else None
-                                ),
-                                TIN_EXPORT_MAX_EDGE,
-                                (
-                                    str(DTM_EXPORT_DIR)
-                                    if DTM_EXPORT_DIR is not None
-                                    else None
-                                ),
-                                DTM_CELL,
-                                neighbour_halo_m,
                             )
                         except BrokenProcessPool:
                             pool_broken = True

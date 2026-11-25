@@ -4,6 +4,7 @@ import sys, tempfile
 from pathlib import Path
 import numpy as np
 from ground_classifier import fast_ground as fg, ply, pipeline, ptdcore
+from ground_classifier.utils.params import RunSettings
 
 fails = 0
 def ok(name, cond, note=""):
@@ -172,13 +173,11 @@ def main():
             t = v[f]; longest = max(np.hypot(*(t[:, i, :2] - t[:, (i + 1) % 3, :2]).T).max() for i in range(3))
             ok("cli: --tin-max-edge (metres) limits the edges", longest <= 5.0 * scale_ft + 1e-3, f"longest {longest / scale_ft:.2f} m")
         # several windows on threads: a file split into four windows, each writing its own mesh; together they are one TIN
-        saved = (pipeline.BLOCK_SIZE, pipeline.TIN_EXPORT_DIR, pipeline.TIN_EXPORT_MAX_EDGE)
-        pipeline.BLOCK_SIZE = 150.0
-        pipeline.configure_tin_export(tmp / "windows", 0.0)
+        pipeline.configure_run(RunSettings(block_size=150.0, tin_export_dir=tmp / "windows"))
         try:
             pipeline.classify_file(tmp / "in" / "tile.las", tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit)
         finally:
-            pipeline.BLOCK_SIZE = saved[0]; pipeline.configure_tin_export(saved[1], saved[2])
+            pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.ply"))
         ok("windows: a file split into windows gets one mesh per window", [w.name for w in win] == [f"tile_w0{i}.ply" for i in range(1, 5)], str([w.name for w in win]))
         if len(win) == 4:

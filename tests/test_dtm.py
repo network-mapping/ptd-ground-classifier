@@ -4,6 +4,7 @@ import sys, tempfile, shutil
 from pathlib import Path
 import numpy as np
 from ground_classifier import dtm, pipeline
+from ground_classifier.utils.params import RunSettings
 
 fails = 0
 def ok(name, cond, note=""):
@@ -145,13 +146,11 @@ def main():
         cli.main(args + ["--output-dir", str(tmp / "out2"), "--export-dtm", str(tmp / "cell_dtm"), "--dtm-cell", "10"])
         ok("cli: --dtm-cell sets the cell size", dtm.read_dtm(tmp / "cell_dtm" / "tile_w01.tif")[2] == 10.0)
         # several windows on threads: each window writes its own raster, with no cell in two of them
-        saved = (pipeline.BLOCK_SIZE, pipeline.DTM_EXPORT_DIR, pipeline.DTM_CELL)
-        pipeline.BLOCK_SIZE = 150.0
-        pipeline.configure_dtm_export(tmp / "windows", 0.0)
+        pipeline.configure_run(RunSettings(block_size=150.0, dtm_export_dir=tmp / "windows"))
         try:
             pipeline.classify_file(tmp / "in" / "tile.las", tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit_scale)
         finally:
-            pipeline.BLOCK_SIZE = saved[0]; pipeline.configure_dtm_export(saved[1], saved[2])
+            pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.tif"))
         ok("windows: one raster per window", [w.name for w in win] == [f"tile_w0{i}.tif" for i in range(1, 5)], str([w.name for w in win]))
         if len(win) == 4:

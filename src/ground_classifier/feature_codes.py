@@ -18,7 +18,7 @@ mapping
 Construction
 ------------
 Built once at start-up from the config's ``feature_codes`` section (see
-``params.FeatureCodesParam``) and handed to ``pipeline.configure_feature_codes``. The
+``params.FeatureCodesParam``) and handed to the pipeline in ``params.RunSettings``. The
 example below uses made-up codes::
 
     >>> fc = FeatureCodes(

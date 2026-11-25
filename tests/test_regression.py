@@ -16,7 +16,7 @@ Fixture (tests/fixtures/fpl_feet, US survey feet):
 
 What is checked, per tile: the run completes; same point count; X, Y, Z and every other dimension carried through;
 generating_software set; classification identical to the reference (on a mismatch: how many points differ and between
-which classes); manifest.json agrees with the output. The input, hag and engine sections of the config file and the fixture
+which classes); manifest.json agrees with the output. The input, windows, hag, engine and feature_codes sections of the config file and the fixture
 tiles must also be the ones the reference was made with, otherwise a difference could not be told from a code change.
 
 Updating the reference, after a deliberate change of behaviour:
@@ -51,7 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "fpl_feet"
 REFERENCE = FIXTURE / "expected.npz"
 CONFIG_FILE = ROOT / "config" / "ground_classifier_config.yml"
-CONFIG_SECTIONS = ("input", "hag", "engine")   # the ones that change results
+CONFIG_SECTIONS = ("input", "windows", "hag", "engine", "feature_codes")   # the ones that change results
 OUTPUT_SUFFIX = "_AdaptiveGround"
 
 fails = 0
@@ -135,7 +135,7 @@ def main():
         meta = json.loads(str(ref["meta"]))
         print(f"reference: {meta['software']}; {meta['note']}; made on {meta['platform']}", flush=True)
         ok("configuration unchanged since the reference was made", meta["config_sha256"] == config_fingerprint(),
-           "input / hag / engine config differ: rewrite the reference if that is intended")
+           "input / windows / hag / engine / feature_codes config differ: rewrite the reference if that is intended")
         ok("fixture tiles unchanged since the reference was made",
            meta["inputs_sha256"] == {p.name: sha256(p) for p in sorted(FIXTURE.glob("*.laz"))})
 

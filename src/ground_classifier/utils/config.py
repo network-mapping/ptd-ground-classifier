@@ -25,6 +25,7 @@ CONFIG_FILENAME = "ground_classifier_config.yml"
 # Config attribute -> the param class of that section of the file.
 SECTIONS = {
     "input_config": p.InputParam,
+    "windows_config": p.WindowsParam,
     "performance_config": p.PerformanceParam,
     "dtm_config": p.DtmParam,
     "hag_config": p.HagParam,

@@ -22,6 +22,11 @@ DEFAULT_LOW_VEG_MAX = 0.50
 DEFAULT_MEDIUM_VEG_MAX = 3.00
 DEFAULT_HIGH_VEG_MAX = 200.00
 
+# Windows: a tile larger than the block size is cut into windows, each read with an overlap around its core.
+# The overlap is deliberately larger than the 60 m initial seed grid.
+DEFAULT_BLOCK_SIZE = 5000.0
+DEFAULT_BLOCK_OVERLAP = 80.0
+
 
 def _number(key: str, value, minimum: float = 0.0) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -29,6 +34,13 @@ def _number(key: str, value, minimum: float = 0.0) -> float:
     value = float(value)
     if not math.isfinite(value) or value < minimum:
         raise SystemExit(f"{key} must be a number >= {minimum:g} (got {value!r})")
+    return value
+
+
+def _positive_number(key: str, value) -> float:
+    value = _number(key, value, minimum=-math.inf)
+    if value <= 0:
+        raise SystemExit(f"{key} must be a number > 0 (got {value!r})")
     return value
 
 
@@ -107,6 +119,31 @@ class InputParam:
             ) from None
         self.units = UNITS_AUTO if unit is None else UNIT_OPTION_NAMES[unit]
         self.neighbour_halo = _number("neighbour_halo", self.neighbour_halo)
+
+
+@dc.dataclass
+class WindowsParam:
+    SECTION: ClassVar[str] = "windows"
+    DOC: ClassVar[str] = (
+        "How a large tile is cut into windows that are classified separately, and in parallel. Unlike the "
+        "performance section, these change classifications near the edges of a window."
+    )
+
+    block_size: float = _field(
+        DEFAULT_BLOCK_SIZE,
+        "Metres. A tile wider or taller than this is cut into windows of about this size (at most 8 per tile; a "
+        "very dense tile is cut by point count as well).",
+    )
+    block_overlap: float = _field(
+        DEFAULT_BLOCK_OVERLAP,
+        "Metres. Each window also reads this far beyond its core, so the surface is continuous across window "
+        "edges. Keep it larger than engine.max_building_size (the starting squares): too small an overlap "
+        "changes the ground near window edges.",
+    )
+
+    def __post_init__(self):
+        self.block_size = _positive_number("block_size", self.block_size)
+        self.block_overlap = _number("block_overlap", self.block_overlap)
 
 
 @dc.dataclass
@@ -326,11 +363,30 @@ class EngineParam:
             raise SystemExit(f"{self.SECTION}: {exc}") from exc
 
 
+@dc.dataclass(frozen=True)
+class RunSettings:
+    """Everything a run hands to the pipeline, as one picklable object: `Config.run_settings()` builds it, and
+    `pipeline.configure_run` applies it in each process (the main one and every spawned worker, which do not inherit
+    the parent's module state). Tests build it directly. Adding a setting means a field here and a line in
+    `configure_run`, not another argument to `run_batch` and `classify_file_worker`."""
+    engine: fast_ground.Settings = dc.field(default_factory=fast_ground.Settings)   # metres
+    hag_bands: tuple[float, float, float] = (DEFAULT_LOW_VEG_MAX, DEFAULT_MEDIUM_VEG_MAX, DEFAULT_HIGH_VEG_MAX)   # metres
+    feature_codes: FeatureCodes = dc.field(default_factory=lambda: FeatureCodesParam().feature_codes())
+    neighbour_halo_m: float = 10.0          # metres of context read from the adjacent tiles; 0 = none
+    tin_export_dir: Path | None = None      # None = no TIN export
+    tin_max_edge: float = 0.0               # metres; triangles with a longer edge are left out (0 = keep all)
+    dtm_export_dir: Path | None = None      # None = no DTM export
+    dtm_cell: float = 0.0                   # in the input unit; 0 = 1 m, or 3 ft
+    block_size: float = DEFAULT_BLOCK_SIZE          # metres: a tile larger than this is cut into windows
+    block_overlap: float = DEFAULT_BLOCK_OVERLAP    # metres: the buffer each window reads around its core
+
+
 @dc.dataclass
 class Config:
     path: PathParam                         # from CLI
     options: OptionParam                    # from CLI
     input_config: InputParam                # from the config file
+    windows_config: WindowsParam
     performance_config: PerformanceParam
     dtm_config: DtmParam
     hag_config: HagParam
@@ -356,12 +412,31 @@ class Config:
     def dtm_cell(self) -> float:
         return self.options.dtm_cell or self.dtm_config.cell_size
 
+    def run_settings(self) -> RunSettings:
+        """What the pipeline needs from this Config."""
+        return RunSettings(
+            engine=self.engine_settings,
+            hag_bands=self.hag_config.bands,
+            feature_codes=self.feature_codes,
+            neighbour_halo_m=self.input_config.neighbour_halo,
+            tin_export_dir=self.path.export_tin,
+            tin_max_edge=self.options.tin_max_edge,
+            dtm_export_dir=self.path.export_dtm,
+            dtm_cell=self.dtm_cell,
+            block_size=self.windows_config.block_size,
+            block_overlap=self.windows_config.block_overlap,
+        )
+
     def as_dict(self) -> dict:
         low, medium, high = self.hag_config.bands
         return {
             "config_file": str(self.path.config) if self.path.config else None,
             "units": self.input_config.units,
             "neighbour_halo_m": self.input_config.neighbour_halo,
+            "windows": {
+                "block_size_m": self.windows_config.block_size,
+                "block_overlap_m": self.windows_config.block_overlap,
+            },
             "workers": self.performance_config.workers,
             "ram_limit_gb": self.performance_config.ram_limit_gb,
             "dtm_cell_size": self.dtm_config.cell_size,
