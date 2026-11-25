@@ -4,6 +4,7 @@ import sys, tempfile, shutil
 from pathlib import Path
 import numpy as np
 from ground_classifier import dtm, pipeline
+from ground_classifier.las import LasFile
 from ground_classifier.utils.params import RunSettings
 
 fails = 0
@@ -148,7 +149,7 @@ def main():
         # several windows on threads: each window writes its own raster, with no cell in two of them
         pipeline.configure_run(RunSettings(block_size=150.0, dtm_export_dir=tmp / "windows"))
         try:
-            pipeline.classify_file(tmp / "in" / "tile.las", tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit_scale)
+            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit_scale)
         finally:
             pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.tif"))

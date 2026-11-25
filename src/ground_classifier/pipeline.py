@@ -63,11 +63,9 @@ from .las import (
     UNIT_LABELS,
     UNIT_OPTION_NAMES,
     US_FEET_TO_METRES,
-    LasHeader,
+    LasDataset,
+    LasFile,
     drop_extra_dimensions,
-    iter_record_batches,
-    lasfiles_in_dir,
-    read_tile,
     unit_for_scale,
     write_tile,
 )
@@ -974,7 +972,7 @@ def process_file_windows(
 
 
 def classify_file(
-    input_path: Path,
+    source: LasFile,
     output_path: Path,
     window_workers: int = 1,
     memory_budget: int | None = None,
@@ -985,9 +983,10 @@ def classify_file(
     input_unit_scale: float = US_FEET_TO_METRES,
 ) -> FileResult:
     started = time.perf_counter()
+    input_path = source.path
     log(f"\nReading: {input_path}")
     read_started = time.perf_counter()
-    tile = read_tile(input_path)
+    tile = source.read()
     if PERFORMANCE_STAGE_TIMINGS:
         log(
             f"TIMING LAZ read: "
@@ -1235,16 +1234,16 @@ def nominal_neighbour_bounds(
     return nominal if finite and contained else data_bounds
 
 
-def read_input_metadata(input_path: Path) -> InputMetadata:
-    """Read only the LAS/LAZ header needed for spatial scheduling."""
-    header = LasHeader.from_file(input_path)
+def input_metadata(source: LasFile) -> InputMetadata:
+    """What the scheduler needs to know about a file, from its header (no points are read)."""
+    header = source.header
     bounds = header.extent_xy
     return InputMetadata(
-        input_path,
+        source.path,
         int(header.point_count),
         header.point_format_size,
         bounds,
-        nominal_neighbour_bounds(input_path, bounds, int(header.point_count)),
+        nominal_neighbour_bounds(source.path, bounds, int(header.point_count)),
     )
 
 
@@ -1323,7 +1322,7 @@ def create_halo_cache_worker(
     cache_path_text: str,
 ) -> HaloCacheInfo:
     """Stream requested halo regions from one source into a raw cache."""
-    source_path = Path(source_path_text)
+    source = LasFile.from_file(source_path_text)
     cache_path = Path(cache_path_text)
     point_count = 0
     cells = DENSITY_GRID_CELLS
@@ -1331,7 +1330,7 @@ def create_halo_cache_worker(
     density_bounds: tuple[float, float, float, float] | None = None
     with cache_path.open("wb") as output_stream:
         try:
-            gxmin, gymin, gxmax, gymax = LasHeader.from_file(source_path).extent_xy
+            gxmin, gymin, gxmax, gymax = source.header.extent_xy
             if (
                 all(
                     math.isfinite(value)
@@ -1344,9 +1343,7 @@ def create_halo_cache_worker(
                 density_counts = np.zeros(cells * cells, dtype=np.int64)
         except Exception:
             density_counts = None
-        for points in iter_record_batches(
-            source_path, batch_size=HALO_CACHE_CHUNK_POINTS
-        ):
+        for points in source.iter_record_batches(HALO_CACHE_CHUNK_POINTS):
             px = np.asarray(points.x, dtype=np.float64)
             py = np.asarray(points.y, dtype=np.float64)
             if density_counts is not None and density_bounds is not None:
@@ -1974,7 +1971,7 @@ def classify_file_worker(
     configure_run(settings)
     configure_input_unit(unit_scale)
     return classify_file(
-        input_path,
+        LasFile.from_file(input_path),
         Path(output_path_text),
         window_workers=max(1, int(window_workers)),
         memory_budget=window_memory_budget,
@@ -1986,7 +1983,7 @@ def classify_file_worker(
     )
 
 
-def reusable_existing_output(input_path: Path, output_path: Path) -> bool:
+def reusable_existing_output(source: LasFile, output_path: Path) -> bool:
     """Return true for a complete output of this version with the expected layout.
 
     Output intentionally omits configured temporary Extra Bytes such as
@@ -1995,11 +1992,11 @@ def reusable_existing_output(input_path: Path, output_path: Path) -> bool:
     """
     if not output_path.is_file() or output_path.stat().st_size == 0:
         return False
-    if output_path.stat().st_mtime < input_path.stat().st_mtime:
+    if output_path.stat().st_mtime < source.path.stat().st_mtime:
         return False
     try:
         stripped = {name.casefold() for name in STRIP_OUTPUT_EXTRA_DIMENSIONS}
-        source_header = LasHeader.from_file(input_path)
+        source_header = source.header
         expected_extra = tuple(
             name
             for name in source_header.extra_dimension_names
@@ -2010,7 +2007,7 @@ def reusable_existing_output(input_path: Path, output_path: Path) -> bool:
             int(source_header.point_format_id),
             expected_extra,
         )
-        output_header = LasHeader.from_file(output_path)
+        output_header = LasFile.from_file(output_path).header
         if output_header.generating_software != GENERATING_SOFTWARE:
             return False
         output_signature = (
@@ -2025,32 +2022,28 @@ def reusable_existing_output(input_path: Path, output_path: Path) -> bool:
 
 def run_batch(
     tasks: list[tuple[Path, Path]],
-    inputs: list[Path],
-    unit_scale_by_path: dict[Path, float],
+    dataset: LasDataset,
     settings: RunSettings,
     requested_workers: int,
     requested_ram_limit_gb: float,
 ) -> tuple[dict[Path, FileResult], list[tuple[Path, BaseException]], dict]:
     """Classify ``tasks`` (input, output) with the resource-aware scheduler.
 
-    ``inputs`` are all files the caller asked for; neighbours of the tasks are
-    taken from the same folders. Returns the per-file results, the files that
-    failed, and the CPU/RAM limits the scheduler used.
+    ``dataset`` holds every file the run knows about: the tasks' inputs and
+    the other tiles beside them (``LasDataset(..., siblings=True)``), whose
+    points give a tile its neighbour context but are not written unless they
+    are tasks too. Its units are the run's. Returns the per-file results, the
+    files that failed, and the CPU/RAM limits the scheduler used.
     """
     configure_run(settings)
     # NEIGHBOUR_HALO is a single process-wide value used while discovering
     # which files are spatial neighbours of each other, before any one
-    # file's classification begins - it needs one project-wide unit. All
-    # files in a run are expected to share the same project/unit; the first
-    # task's unit is used for this shared step, and every actual
-    # classification still uses its own file's individually resolved unit.
-    configure_input_unit(unit_scale_by_path[tasks[0][0]])
+    # file's classification begins - it needs the dataset's one unit, which
+    # every file's classification uses too.
+    unit_scale = dataset.metres_per_unit
+    configure_input_unit(unit_scale)
 
-    unit_labels = sorted({
-        UNIT_LABELS[unit_for_scale(scale)]
-        for scale in unit_scale_by_path.values()
-    })
-    unit_summary = " and ".join(unit_labels) if unit_labels else "unknown"
+    unit_summary = UNIT_LABELS[dataset.units]
     low_veg, medium_veg, high_veg = settings.hag_bands
     low_code, medium_code, high_code = (
         application_code(settings.feature_codes, name)
@@ -2103,18 +2096,10 @@ def run_batch(
         f"currently available {format_memory(snapshot.available)}"
     )
 
-    # Explicitly supplied targets still discover spatial neighbours in their
-    # folders. Those neighbours provide context but are not written unless
-    # they were also supplied as targets.
-    candidate_paths = set(inputs)
-    for parent in {path.parent for path in inputs}:
-        candidate_paths.update(
-            path.resolve() for path in lasfiles_in_dir(parent)
-        )
-    candidate_metadata = [
-        read_input_metadata(path)
-        for path in sorted(candidate_paths, key=str)
-    ]
+    # The tasks still discover spatial neighbours among the dataset's other
+    # files. Those neighbours provide context but are not written unless they
+    # were also supplied as targets.
+    candidate_metadata = [input_metadata(source) for source in dataset.sources]
     metadata_by_path = {
         metadata.path: metadata for metadata in candidate_metadata
     }
@@ -2205,7 +2190,7 @@ def run_batch(
                         for source in neighbours_by_target[input_path]
                         if source in halo_caches
                     ),
-                    unit_scale_by_path[input_path],
+                    unit_scale,
                     (
                         halo_caches[input_path].density
                         if input_path in halo_caches
@@ -2237,10 +2222,10 @@ def run_batch(
             )
             for input_path, output_path in task_list:
                 configure_runtime(cpu_budget)
-                configure_input_unit(unit_scale_by_path[input_path])
+                configure_input_unit(unit_scale)
                 try:
                     results[input_path] = classify_file(
-                        input_path,
+                        dataset.file(input_path),
                         output_path,
                         window_workers=window_workers,
                         memory_budget=memory_budget,
@@ -2250,7 +2235,7 @@ def run_batch(
                         neighbour_bounds=(
                             metadata_by_path[input_path].neighbour_bounds
                         ),
-                        input_unit_scale=unit_scale_by_path[input_path],
+                        input_unit_scale=unit_scale,
                     )
                 except Exception as exc:
                     failures.append((input_path, exc))
@@ -2385,7 +2370,7 @@ def run_batch(
                                 metadata_by_path[input_path].bounds,
                                 metadata_by_path[input_path].neighbour_bounds,
                                 settings,
-                                unit_scale_by_path[input_path],
+                                unit_scale,
                                 threads,
                                 (
                                     memory_budget

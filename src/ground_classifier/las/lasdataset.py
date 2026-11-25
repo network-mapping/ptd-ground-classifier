@@ -34,6 +34,11 @@ explicit sequence keeps the caller's order. Empty tiles are logged and skipped
 lists them), and an all-empty dataset is valid but has no CRS, units or reference
 header unless the units were stated (accessing those raises ``LasDatasetError``).
 
+Neighbours and single members. A tile's surroundings are the other tiles in its folder, so
+``LasDataset(files, siblings=True)`` holds the given files and every other LAS/LAZ file beside them
+under one set of units; ``dataset.file(path)`` finds a member, and ``lasfile.read()`` or
+``lasfile.iter_record_batches()`` reads its points.
+
 Streaming points without loading a whole dataset into memory::
 
     for lasfile, records in dataset.iter_record_batches(batch_size=250_000):
@@ -70,7 +75,9 @@ import logging
 import numpy as np
 
 from .lasheader import LasHeader, LasHeaderError
-from .lasutils import UNITS_AUTO, get_conversion, parse_units_option
+from .lasio import iter_record_batches as _iter_record_batches
+from .lasio import read_tile as _read_tile
+from .lasutils import UNITS_AUTO, get_conversion, lasfiles_in_dir, parse_units_option
 
 
 logger = logging.getLogger(__name__)
@@ -86,7 +93,7 @@ class LasUnitsError(LasDatasetError):
 
 @dataclass(frozen=True)
 class LasFile:
-    """Immutable descriptor of one LAS/LAZ file.
+    """Immutable descriptor of one LAS/LAZ file, and the way to read its points.
 
     Attributes:
         path: Location of the file.
@@ -98,6 +105,9 @@ class LasFile:
 
         lasfile = LasFile.from_file('tile.laz')
         lasfile.header.point_count
+        tile = lasfile.read()                            # the whole tile (a laspy.LasData)
+        for records in lasfile.iter_record_batches():    # or in bounded batches
+            ...
     """
 
     path: Path
@@ -112,6 +122,14 @@ class LasFile:
         status = path.stat()
         return cls(path, header, (status.st_size, status.st_mtime_ns))
 
+    def read(self):
+        """Read the whole file: its header and every point record (a ``laspy.LasData``)."""
+        return _read_tile(self.path)
+
+    def iter_record_batches(self, batch_size=250_000):
+        """Yield the file's points as ``laspy.ScaleAwarePointRecord`` batches of at most ``batch_size`` rows."""
+        yield from _iter_record_batches(self.path, batch_size=batch_size)
+
 
 class LasDataset:
     """Ordered, validated set of LAS/LAZ files that share a CRS and units.
@@ -124,6 +142,10 @@ class LasDataset:
         units: ``'auto'`` (default) reads the units from the CRS, which every
             non-empty file must carry, be projected and share. ``'metres'``,
             ``'usft'`` or ``'foot'`` state the units instead and skip those CRS checks.
+        siblings: Also include every other LAS/LAZ file in the folders of the given
+            files, the tiles around them that give them their surroundings. The dataset
+            is then in sorted path order, with absolute paths, and its units and CRS
+            checks cover all of them.
         file_extent_warning_threshold: Length in metres (default 1000). A warning is
             logged for any file whose largest extent exceeds it, since untiled data
             can exhaust memory.
@@ -137,9 +159,10 @@ class LasDataset:
         dataset = LasDataset('data/tiles', units='usft', file_extent_warning_threshold=2000)
         for lasfile in dataset:
             print(lasfile.path.name, lasfile.header.point_count)
+        dataset.file('data/tiles/a.laz').read()      # one member, by path
     """
 
-    def __init__(self, data, feature_codes=None, *, units=UNITS_AUTO, file_extent_warning_threshold=1000.0):
+    def __init__(self, data, feature_codes=None, *, units=UNITS_AUTO, siblings=False, file_extent_warning_threshold=1000.0):
         self.data = data
         self.feature_codes = feature_codes
         try:
@@ -163,7 +186,13 @@ class LasDataset:
             raise FileNotFoundError(f'No matching LAS/LAZ input for {data}.')
         if len({path.resolve() for path in paths}) != len(paths):
             raise LasDatasetError('A LAS dataset cannot contain duplicate source paths.')
+        if siblings:
+            found = {path.resolve() for path in paths}
+            for folder in {path.parent for path in found}:
+                found.update(file.resolve() for file in lasfiles_in_dir(folder))
+            paths = sorted(found, key=str)
         self._sources = tuple(LasFile.from_file(path) for path in paths)
+        self._by_path = {source.path.resolve(): source for source in self._sources}
         for source in self._sources:
             if not source.header.point_count:
                 logger.warning('%s: source tile contains no points and will be skipped.', source.path)
@@ -213,6 +242,17 @@ class LasDataset:
     def sources(self) -> tuple[LasFile, ...]:
         """Every source file in dataset order, including empty ones."""
         return self._sources
+
+    def file(self, path) -> LasFile:
+        """The member at ``path`` (any spelling of it; empty files too).
+
+        Raises:
+            KeyError: ``path`` is not in this dataset.
+        """
+        try:
+            return self._by_path[Path(path).resolve()]
+        except KeyError:
+            raise KeyError(f'{path} is not in this LAS dataset.') from None
 
     @staticmethod
     def _signature(path):
@@ -341,8 +381,6 @@ class LasDataset:
             for lasfile, records in dataset.iter_record_batches(100_000):
                 process(records.x, records.y, records.z)
         """
-        from .lasio import iter_record_batches
-
         for source in self._files:
-            for records in iter_record_batches(source.path, batch_size=batch_size):
+            for records in source.iter_record_batches(batch_size):
                 yield source, records

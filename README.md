@@ -7,7 +7,7 @@ Ground routine; see [docs/engine.md](docs/engine.md) for the algorithm and resul
 
 | Path | Contents |
 |---|---|
-| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `reclassify` (how a block of points gets its class codes: the engine's ground, HAG bands, noise), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `las` (reading and writing LAS/LAZ: headers, CRS and units, tile I/O; the only place the classify path touches laspy), `utils` (command line, run configuration, logging: see its README), `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
+| `src/ground_classifier/` | Python package: `cli`, `pipeline` (tiles, windows, scheduler), `reclassify` (how a block of points gets its class codes: the engine's ground, HAG bands, noise), `fast_ground` (the engine: low points, starting points, the run), `ptdcore` (Python front for the compiled core), `las` (the set of LAS/LAZ files a run works on, `LasDataset`: its members, their neighbours in the same folders, and the run's units, from the CRS or stated; and reading and writing them; the only place the classify path touches laspy), `utils` (command line, run configuration, logging: see its README), `manifest`, `compare`, `ply` (TIN meshes), `dtm` (ground rasters), `dtm_diff` (subtracting them) |
 | `native/` | `ptdcore.c` (the compiled core) and `build.sh` |
 | `config/` | `ground_classifier_config.yml`: the settings (sections `input`, `performance`, `dtm`, `hag`, `engine`) |
 | `tests/` | core self-checks, the real-tile regression test (`fixtures/`), the memory test and the TerraScan validation suite (`validation/`) |

@@ -193,6 +193,38 @@ def main():
     ok("batches: refuses to overwrite unless told to", raises(FileExistsError, lambda: las.write_record_batches(batches, header, las.iter_record_batches(source))) is not None
        and las.write_record_batches(batches, header, las.iter_record_batches(source), overwrite=True) == int(header.point_count))
 
+    # 8b. a file reads its own points, a dataset finds its members, and can take in the files beside them
+    member = las.LasFile.from_file(FIXTURES[0])
+    whole = member.read()
+    ok("file: read() is the whole tile", len(whole.points) == member.header.point_count == 209_219 and whole.header.point_format.id == member.header.point_format_id)
+    batches = list(member.iter_record_batches(100_000))
+    ok("file: iter_record_batches() gives every point in batches of at most the size", sum(len(b) for b in batches) == 209_219 and max(len(b) for b in batches) <= 100_000 and len(batches) == 3, str([len(b) for b in batches]))
+    ok("file: a bad batch size is an error", raises(ValueError, lambda: list(member.iter_record_batches(0))) is not None)
+    found = las.LasDataset(FIXTURES)
+    ok("dataset: file() finds a member by its path, however it is spelt", found.file(FIXTURES[1]).path == FIXTURES[1] and found.file(FIXTURES[1].parent / ".." / "fpl_feet" / FIXTURES[1].name).path == FIXTURES[1])
+    ok("dataset: ... and an empty one", las.LasDataset([empty, nocrs[0]], units="metres").file(empty).header.point_count == 0)
+    missing = raises(KeyError, lambda: found.file(nocrs[0]))
+    ok("dataset: a path that is not a member is a KeyError saying so", missing is not None and "is not in this LAS dataset" in str(missing))
+    ok("dataset: iterating the dataset reads through the same files", next(iter(found.iter_record_batches(1_000_000)))[0].path == FIXTURES[0])
+
+    one = las.LasDataset([FIXTURES[0]], siblings=True)
+    ok("siblings: one file brings in the other tiles of its folder, sorted, as absolute paths", [lf.path.name for lf in one.sources] == [p.name for p in FIXTURES] and all(lf.path.is_absolute() for lf in one.sources))
+    ok("siblings: the units and CRS then cover all of them", one.units == las.US_FEET and one.epsg == 6438 and one.point_count == 1_794_130)
+    ok("siblings: without the option only the given file", [lf.path.name for lf in las.LasDataset([FIXTURES[0]]).sources] == [FIXTURES[0].name])
+    nearby = tmp / "nearby"
+    for name, crs in (("a.las", metres), ("b.las", None), ("c.las", usft)):
+        make_las(nearby / name, crs=crs, seed=7)
+    error = raises(las.LasUnitsError, lambda: las.LasDataset([nearby / "a.las"], siblings=True))
+    ok("siblings: a neighbour with no CRS stops an auto run, naming it", error is not None and "b.las" in str(error))
+    mixed = tmp / "mixed"
+    make_las(mixed / "a.las", crs=metres, seed=8); make_las(mixed / "c.las", crs=usft, seed=9)
+    ok("siblings: ... and a neighbour in other units is a mismatch", "mismatch" in str(raises(las.LasDatasetError, lambda: las.LasDataset([mixed / "a.las"], siblings=True))))
+    ok("siblings: with the units stated nothing is compared", [lf.path.name for lf in las.LasDataset([nearby / "a.las"], siblings=True, units="metres").sources] == ["a.las", "b.las", "c.las"])
+    ok("siblings: a file given twice is still an error", raises(las.LasDatasetError, lambda: las.LasDataset([nearby / "a.las", nearby / "a.las"], siblings=True, units="metres")) is not None)
+    two = las.LasDataset([nearby / "a.las", FIXTURES[0]], siblings=True, units="usft")
+    ok("siblings: the folders of all the given files", len(two.sources) == 5, str([lf.path.name for lf in two.sources]))
+    ok("siblings: refreshed() keeps the members", [lf.path for lf in one.refreshed().sources] == [lf.path for lf in one.sources])
+
     # 9. the logging bridge
     shown = []
     loggers._LOG_STATE.buffer = shown
@@ -255,6 +287,22 @@ def main():
     ok("cli: input errors keep their messages",
        [run(a)[0] for a in (tmp / "nope.laz", inputs / "notes.txt", tmp / "none")] ==
        [f"Input does not exist: {(tmp / 'nope.laz').resolve()}", f"Input must be LAS or LAZ: {(inputs / 'notes.txt').resolve()}", "No LAS/LAZ input found."])
+
+    # one file of a folder: its neighbours come from the dataset, which holds the whole folder
+    code, text = run(FIXTURES[0], "--output-dir", tmp / "o_one", "--workers", "1")
+    manifest = json.loads((tmp / "o_one" / "manifest.json").read_text())
+    ok("cli: one file of a folder is classified, and only that one is written and reported",
+       code == 0 and [Path(f["input"]).name for f in manifest["files"]] == [FIXTURES[0].name] and sorted(p.name for p in (tmp / "o_one").glob("*.laz")) == [FIXTURES[0].stem + "_AdaptiveGround.laz"])
+    ok("cli: ... with the neighbouring tile of its folder as context", "Neighbour context:" in text and "from 1 adjacent file(s)" in text, str([l for l in text.splitlines() if "Neighbour" in l]))
+    ok("cli: ... in the units read from the whole folder's CRS", "Input units: US survey feet (from the CRS, EPSG 6438)" in text)
+    # a neighbour with no CRS, beside a tile that has one
+    mixed_in = tmp / "mixed_in"
+    make_las(mixed_in / "tile.las", n=20_000, crs=usft, seed=11)
+    make_las(mixed_in / "stray.las", n=1_000, seed=12)
+    code, text = run(mixed_in / "tile.las", "--output-dir", tmp / "o_mixed", "--workers", "1")
+    ok("cli: a file beside it with no CRS stops an auto run, naming it", isinstance(code, str) and "stray.las" in code and "--units" in code, str(code)[:100])
+    code, text = run(mixed_in / "tile.las", "--output-dir", tmp / "o_mixed2", "--units", "usft", "--workers", "1")
+    ok("cli: ... and with the units stated it is context like any other", code == 0, str(code))
 
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{fails} failed" if fails else "\nall passed")

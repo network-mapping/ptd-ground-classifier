@@ -4,6 +4,7 @@ import sys, tempfile
 from pathlib import Path
 import numpy as np
 from ground_classifier import fast_ground as fg, ply, pipeline, ptdcore, reclassify
+from ground_classifier.las import LasFile
 from ground_classifier.utils.params import RunSettings
 
 fails = 0
@@ -175,7 +176,7 @@ def main():
         # several windows on threads: a file split into four windows, each writing its own mesh; together they are one TIN
         pipeline.configure_run(RunSettings(block_size=150.0, tin_export_dir=tmp / "windows"))
         try:
-            pipeline.classify_file(tmp / "in" / "tile.las", tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit)
+            pipeline.classify_file(LasFile.from_file(tmp / "in" / "tile.las"), tmp / "w_out.las", window_workers=2, kdtree_workers=2, input_unit_scale=unit)
         finally:
             pipeline.configure_run(RunSettings())
         win = sorted((tmp / "windows").glob("tile_w*.ply"))

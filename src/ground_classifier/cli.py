@@ -13,10 +13,9 @@ from .las import (
     UNITS_AUTO,
     LasDataset,
     LasDatasetError,
-    LasHeader,
+    LasFile,
     LasUnitsError,
     expand_inputs,
-    unit_for_scale,
 )
 from .pipeline import (
     OUTPUT_SUFFIX,
@@ -36,18 +35,14 @@ def collect_inputs(paths: list[Path]) -> list[Path]:
         raise SystemExit(str(exc)) from exc
 
 
-def _unit_name(scale: float) -> str:
-    return UNIT_OPTION_NAMES[unit_for_scale(scale)]
-
-
-def _input_scale(task_inputs: list[Path], units: str) -> float:
-    """Metres per coordinate unit of the files being classified: as stated by --units or the config file, else
-    from their CRS. Exits with a message saying how to state it when the CRS cannot tell."""
+def _open_dataset(inputs: list[Path], units: str) -> LasDataset:
+    """The files being classified and the other tiles beside them (their neighbours), as one dataset in the units
+    stated by --units or the config file, else read from the CRS. Exits with a message saying how to state the
+    units when the CRS cannot tell."""
     try:
-        dataset = LasDataset(task_inputs, units=units)
+        dataset = LasDataset(inputs, units=units, siblings=True)
         if units == UNITS_AUTO and not dataset.files:
             raise LasUnitsError("Every input tile is empty, so there is no CRS to read the units from.")
-        scale = dataset.metres_per_unit
     except LasUnitsError as exc:
         raise SystemExit(
             f"{exc}\nPass --units metres, usft or foot, or set \"units\" in the config file's input section, "
@@ -57,11 +52,11 @@ def _input_scale(task_inputs: list[Path], units: str) -> float:
         raise SystemExit(str(exc)) from exc
     if units == UNITS_AUTO:
         log(f"Input units: {UNIT_LABELS[dataset.units]} (from the CRS, EPSG {dataset.epsg})")
-    return scale
+    return dataset
 
 
 def classify(config: Config) -> int:
-    
+
     started, clock = manifest.utc_now(), time.perf_counter()
     locations, options = config.path, config.options
     inputs = collect_inputs(list(locations.inputs))
@@ -77,15 +72,7 @@ def classify(config: Config) -> int:
     pairs = [(p, output_dir / f"{p.stem}{OUTPUT_SUFFIX}{p.suffix.lower()}") for p in inputs]
     records = {i: manifest.file_record(i, o) for i, o in pairs}
     tasks: list[tuple[Path, Path]] = []
-    for input_path, output_path in pairs:
-        if not options.overwrite and reusable_existing_output(input_path, output_path):
-            records[input_path].update(
-                status="reused", generated_by=LasHeader.from_file(output_path).generating_software
-            )
-        else:
-            tasks.append((input_path, output_path))
 
-    units_setting = config.units
     requested_workers = config.workers
     requested_ram_gb = config.ram_limit_gb
     resources = None
@@ -93,16 +80,22 @@ def classify(config: Config) -> int:
 
     log(f"ground-classifier {__version__} (core {ptdcore.CORE_VERSION}); output: {output_dir}")
     try:
+        dataset = _open_dataset(inputs, config.units)
+        for input_path, output_path in pairs:
+            if not options.overwrite and reusable_existing_output(dataset.file(input_path), output_path):
+                records[input_path].update(
+                    status="reused", generated_by=LasFile.from_file(output_path).header.generating_software
+                )
+            else:
+                tasks.append((input_path, output_path))
         reused = len(pairs) - len(tasks)
         if reused:
             log(f"Reusing {reused:,} complete output(s) from this version. Use --overwrite to rebuild them.")
         if tasks:
-            scale = _input_scale([i for i, _ in tasks], units_setting)
-            scale_by_path = {i: scale for i, _ in tasks}
-            for input_path, scale in scale_by_path.items():
-                records[input_path]["unit"] = _unit_name(scale)
+            for input_path, _ in tasks:
+                records[input_path]["unit"] = UNIT_OPTION_NAMES[dataset.units]
             results, failures, resources = run_batch(
-                tasks, inputs, scale_by_path, config.run_settings(),
+                tasks, dataset, config.run_settings(),
                 requested_workers, requested_ram_gb,
             )
             for input_path, output_path in tasks:
