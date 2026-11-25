@@ -3,7 +3,7 @@ usage: python tests/test_tin_export.py"""
 import sys, tempfile
 from pathlib import Path
 import numpy as np
-from ground_classifier import fast_ground as fg, ply, pipeline, ptdcore
+from ground_classifier import fast_ground as fg, ply, pipeline, ptdcore, reclassify
 from ground_classifier.utils.params import RunSettings
 
 fails = 0
@@ -113,10 +113,10 @@ def main():
     unit = 0.3048006096012192
     tin_faces = []
     cls = np.full(N, 2, np.uint8)
-    pipeline.classify_block(x, y, z, cls, tin_faces)
+    reclassify.classify_block(x, y, z, cls, RunSettings(), tin_faces)
     ok("classify_block: appends the block's TIN to tin_out", len(tin_faces) == 1 and np.array_equal(tin_faces[0], tri) or
        (len(tin_faces) == 1 and tin_faces[0].shape == tri.shape))
-    ok("classify_block: tin_out is optional (the unpacking of validate_suite.py still works)", len(pipeline.classify_block(x, y, z, cls)) == 3)
+    ok("classify_block: tin_out is optional (the unpacking of validate_suite.py still works)", len(reclassify.classify_block(x, y, z, cls, RunSettings())) == 3)
     export = pipeline.TinExport(tmp / "tins", "tile", unit)
     xmax, ymax = float(x.max()), float(y.max())
     cores = [(0.0, 0.0, 150.0, ymax), (150.0, 0.0, xmax, ymax)]

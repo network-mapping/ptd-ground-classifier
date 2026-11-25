@@ -1,14 +1,10 @@
 """Batch pipeline: reads LAS/LAZ tiles, classifies them with the compiled
 progressive-TIN core (see fast_ground.py) and writes them back.
 
-Input classes that the config's feature_codes section maps to a feature (by default
-2, 3, 4, 5 and 13) are reset and re-labelled; every other class is kept. HAG = height
-above the finished ground surface, in metres. The output codes below are the defaults:
-    2  Ground
-    3  Low vegetation:    HAG <= low_veg_max
-    4  Medium vegetation: low_veg_max < HAG < medium_veg_max
-    5  High vegetation:   medium_veg_max <= HAG <= high_veg_max
-    7  Noise: isolated low points, and HAG > high_veg_max
+How a block of points gets its class codes (ground, the three vegetation
+bands, noise) is in reclassify.py; this module reads the tiles, cuts them into
+windows with the neighbouring tiles' context, schedules the work across
+processes and threads, and writes the results.
 
 Every threshold is in metres. Input X/Y/Z are converted to metres once, in
 memory, in classify_file(), using the run's unit (see las.LasDataset.metres_per_unit); the
@@ -62,7 +58,7 @@ except ImportError as exc:
         "Install dependencies with: pip install -r requirements.txt"
     ) from exc
 
-from . import __version__, dtm, fast_ground, ply
+from . import __version__, dtm, ply
 from .las import (
     UNIT_LABELS,
     UNIT_OPTION_NAMES,
@@ -75,50 +71,23 @@ from .las import (
     unit_for_scale,
     write_tile,
 )
+from .reclassify import (
+    InsufficientGroundSupport,
+    application_code,
+    classify_block,
+    reset_input_class_mask,
+)
 from .utils.loggers import _LOG_STATE, log
 from .utils.params import RunSettings
 
 # Written into every output header so a file shows which version made it.
 GENERATING_SOFTWARE = f"ground-classifier {__version__}"
 
-# The settings of a run live in these module globals, set in every process by
-# configure_run() because spawned helpers do not inherit them. The values
-# below are the defaults, for a caller that never configures a run.
-_DEFAULTS = RunSettings()
-
-# Settings handed to fast_ground.GroundRun (metres).
-FAST_ENGINE_SETTINGS = _DEFAULTS.engine
-
-# A point the low-point filter kept out of the surface is labelled noise
-# only if it ends up at least this far below the finished ground (metres).
-FAST_ENGINE_LOW_NOISE_DEPTH = 0.5
-
-# HAG thresholds (metres), whatever the input file's own coordinate unit.
-LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX = _DEFAULTS.hag_bands
-
-# Input -> output class codes.
-FEATURE_CODES = _DEFAULTS.feature_codes
-
-
-def application_code(name: str) -> int:
-    """The class code written for the feature `name` (e.g. "ground")."""
-    return FEATURE_CODES("application")[name].code
-
-
-# Optional export of each window's TIN as a PLY mesh (see export_window_tin()).
-# None = no export; the edge limit is in metres, 0 = no limit.
-TIN_EXPORT_DIR: Path | None = _DEFAULTS.tin_export_dir
-TIN_EXPORT_MAX_EDGE = _DEFAULTS.tin_max_edge
-
-# Optional export of each window's ground raster (see export_window_dtm()).
-# The cell size is in the input unit; 0 = the default for the file's unit
-# (see default_dtm_cell()).
-DTM_EXPORT_DIR: Path | None = _DEFAULTS.dtm_export_dir
-DTM_CELL = _DEFAULTS.dtm_cell
-
-# Block processing: see processing_windows() and buffered_indices_for_window().
-BLOCK_SIZE = _DEFAULTS.block_size
-BLOCK_OVERLAP = _DEFAULTS.block_overlap
+# The settings of the run (engine, HAG bands, feature codes, neighbour halo,
+# TIN and DTM export, window size and overlap) live in this module global,
+# set in every process by configure_run() because spawned helpers do not
+# inherit it. The default is for a caller that never configures a run.
+RUN_SETTINGS = RunSettings()
 
 
 def configure_run(settings: RunSettings) -> None:
@@ -127,19 +96,8 @@ def configure_run(settings: RunSettings) -> None:
     that do not inherit the parent's mutated globals) - mirrors the
     configure_runtime() pattern. The settings that depend on the input
     file's unit are applied by configure_input_unit()."""
-    global FAST_ENGINE_SETTINGS, LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX
-    global FEATURE_CODES, TIN_EXPORT_DIR, TIN_EXPORT_MAX_EDGE
-    global DTM_EXPORT_DIR, DTM_CELL, BLOCK_SIZE, BLOCK_OVERLAP, NEIGHBOUR_HALO_METRES
-    FAST_ENGINE_SETTINGS = settings.engine
-    LOW_VEG_MAX, MEDIUM_VEG_MAX, HIGH_VEG_MAX = settings.hag_bands
-    FEATURE_CODES = settings.feature_codes
-    TIN_EXPORT_DIR = settings.tin_export_dir
-    TIN_EXPORT_MAX_EDGE = settings.tin_max_edge
-    DTM_EXPORT_DIR = settings.dtm_export_dir
-    DTM_CELL = settings.dtm_cell
-    BLOCK_SIZE = settings.block_size
-    BLOCK_OVERLAP = settings.block_overlap
-    NEIGHBOUR_HALO_METRES = float(settings.neighbour_halo_m)
+    global RUN_SETTINGS
+    RUN_SETTINGS = settings
 
 
 def default_dtm_cell(unit_scale: float) -> float:
@@ -177,9 +135,9 @@ class TinExport:
 # window-level parallelism (see processing_windows()). Actual window count
 # is always self-limited by real tile geometry via TURBO_MIN_CORE_SIZE.
 #
-# IMPORTANT: every window reprocesses an BLOCK_OVERLAP-wide buffer on each
+# IMPORTANT: every window reprocesses a block_overlap-wide buffer on each
 # side, so the "buffered" area a window actually computes is
-# (core + 2*BLOCK_OVERLAP)^2, not core^2. With BLOCK_OVERLAP=80 m, a core
+# (core + 2*block_overlap)^2, not core^2. With block_overlap=80 m, a core
 # near the old 120 m floor is buffered out to ~280 m per side - about 5x its
 # own area reprocessed. That overhead was measured directly (see test notes)
 # to make small-window splits SLOWER than a single window despite running in
@@ -252,7 +210,6 @@ FULL_FILE_BYTES_PER_POINT = 96
 # halo around the target bounds. Temporary halo caches mean each neighbour
 # file is decompressed once per run rather than once for every adjacent tile.
 NEIGHBOUR_HALO = 10.0 / US_FEET_TO_METRES  # 32.808333... USft = 10 m physical.
-NEIGHBOUR_HALO_METRES = _DEFAULTS.neighbour_halo_m
 # Re-derived per file by configure_input_unit() once the project's real
 # input unit is known (see las.LasDataset.metres_per_unit) - the fixed feet
 # value above is only the pre-configuration default, kept for any direct
@@ -270,14 +227,14 @@ NOMINAL_TILE_SIZE_USFT = 1500.0
 
 def configure_input_unit(metres_per_input_unit: float) -> None:
     """Express the unit-dependent settings in the project's real input unit:
-    the neighbour halo (NEIGHBOUR_HALO_METRES, from configure_run()) and the
+    the neighbour halo (RunSettings.neighbour_halo_m, from configure_run()) and the
     nominal tile size. Must be called once the input unit is known, before
     any neighbour-tile discovery or halo-buffered classify_file work runs,
     and re-called at the start of any worker process that does not inherit
     this process's mutated globals (Windows multiprocessing spawn), after
     configure_run()."""
     global NEIGHBOUR_HALO, NOMINAL_TILE_SIZE_USFT
-    NEIGHBOUR_HALO = NEIGHBOUR_HALO_METRES / max(metres_per_input_unit, 1.0e-9)
+    NEIGHBOUR_HALO = RUN_SETTINGS.neighbour_halo_m / max(metres_per_input_unit, 1.0e-9)
     # metres_per_input_unit == 1.0 for a metres project (native tile = 500),
     # US_FEET_TO_METRES for a feet project (native tile = 1500).
     NOMINAL_TILE_SIZE_USFT = (
@@ -346,10 +303,6 @@ class InputMetadata:
     record_size: int
     bounds: tuple[float, float, float, float]
     neighbour_bounds: tuple[float, float, float, float]
-
-
-class InsufficientGroundSupport(RuntimeError):
-    """The available geometry cannot support a progressive ground TIN."""
 
 
 @dataclass(frozen=True)
@@ -508,117 +461,11 @@ def format_memory(byte_count: int) -> str:
     return f"{byte_count / 1024**3:.1f} GB"
 
 
-def reset_input_class_mask(classification: np.ndarray) -> np.ndarray:
-    """Return the mask of points in a re-labelled input class, without np.isin's setup overhead."""
-    mask = np.zeros(classification.shape, dtype=bool)
-    for code in FEATURE_CODES.mapped_input_feature_codes:
-        mask |= classification == code
-    return mask
-
-
 # Output-header policy. TerraScan and some upstream workflows may leave a
 # temporary Extra Bytes dimension named "Distance" in the input. It is not
 # required by this classifier and should not be propagated to delivery files.
 # All other input Extra Bytes dimensions and VLRs are preserved.
 STRIP_OUTPUT_EXTRA_DIMENSIONS = ("Distance",)
-
-
-def assign_hag_classes(
-    classification: np.ndarray,
-    remaining: np.ndarray,
-    hag: np.ndarray,
-) -> None:
-    """Assign the three vegetation classes from final HAG, using
-    the run's HAG bands (RunSettings.hag_bands, applied by
-    configure_run()). HAG is always in metres regardless of the
-    input file's own coordinate unit."""
-    low_code, medium_code, high_code = (
-        application_code(name)
-        for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
-    )
-    classification[remaining & (hag <= LOW_VEG_MAX)] = low_code
-    classification[
-        remaining
-        & (hag > LOW_VEG_MAX)
-        & (hag < MEDIUM_VEG_MAX)
-    ] = medium_code
-    classification[
-        remaining
-        & (hag >= MEDIUM_VEG_MAX)
-        & (hag <= HIGH_VEG_MAX)
-    ] = high_code
-
-
-def classify_block(
-    x: np.ndarray,
-    y: np.ndarray,
-    z: np.ndarray,
-    initial_classification: np.ndarray,
-    tin_out: list[np.ndarray] | None = None,
-    tin_max_edge: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Classify one block with the compiled core.
-
-    The re-labelled input classes (FEATURE_CODES.mapped_input_feature_codes)
-    are reset and labelled ground / low, medium, high vegetation / noise,
-    every other class is left alone, and the result is (classification,
-    height above ground, ground point indices).
-
-    If tin_out is a list, the block's TIN is appended to it as an (m, 3)
-    array of indices into x, y, z (see GroundRun.tin(); tin_max_edge is
-    its max_edge, in metres).
-    """
-    classification = initial_classification.copy()
-    unclassified_code = application_code("unclassified")
-    source = np.flatnonzero(reset_input_class_mask(classification))
-    if source.size < 3:
-        raise InsufficientGroundSupport(
-            "Fewer than three eligible source-class candidates."
-        )
-    try:
-        run = fast_ground.GroundRun(
-            x[source], y[source], z[source], FAST_ENGINE_SETTINGS
-        ).run()
-    except ValueError as exc:
-        raise InsufficientGroundSupport(str(exc)) from exc
-    ground = run.ground()
-    height = run.heights()
-    low = run.low()
-
-    labels = np.full(source.size, unclassified_code, dtype=classification.dtype)
-    labels[ground] = application_code("ground")
-    open_points = ~ground
-    noise_code = application_code("noise")
-    labels[open_points & (height > HIGH_VEG_MAX)] = noise_code
-    low_noise = open_points & low & (height < -FAST_ENGINE_LOW_NOISE_DEPTH)
-    labels[low_noise] = noise_code
-    assign_hag_classes(labels, labels == unclassified_code, height)
-    classification[source] = labels
-
-    hag = np.full(x.size, np.nan, dtype=np.float32)
-    hag[source] = height
-    model = run.model()
-    if tin_out is not None:
-        tin_out.append(source[run.tin(tin_max_edge)])
-    surface_count = int(np.count_nonzero(model))
-    ground_count = int(np.count_nonzero(ground))
-    log(
-        f"      Fast engine: {ground_count:,} ground points of "
-        f"{source.size:,} candidates ({surface_count:,} on the surface, "
-        f"{ground_count - surface_count:,} within "
-        f"{100 * float(run.settings.ground_band.width):g} cm of it); surface "
-        f"followed past its edge +{run.followed:,}, corners turned "
-        f"+{run.turned:,}, spikes taken out {run.spikes_removed:,}; "
-        f"isolated low points kept out: {int(np.count_nonzero(low)):,} "
-        f"({int(np.count_nonzero(low_noise)):,} labelled noise)"
-    )
-    if run.seed_square < float(FAST_ENGINE_SETTINGS.seeds.max_building_size):
-        log(
-            "      Small block: starting squares reduced to "
-            f"{run.seed_square:g} m so the surface has at least three "
-            "starting points."
-        )
-    return classification, hag, source[model]
 
 
 def processing_windows(
@@ -651,8 +498,8 @@ def window_cores_for_extent(
     width = max(xmax - xmin, 1.0e-9)
     height = max(ymax - ymin, 1.0e-9)
 
-    physical_nx = max(1, int(math.ceil(width / BLOCK_SIZE)))
-    physical_ny = max(1, int(math.ceil(height / BLOCK_SIZE)))
+    physical_nx = max(1, int(math.ceil(width / RUN_SETTINGS.block_size)))
+    physical_ny = max(1, int(math.ceil(height / RUN_SETTINGS.block_size)))
     physical_windows = physical_nx * physical_ny
 
     point_windows = (
@@ -736,10 +583,11 @@ def buffered_indices_for_window(
 ) -> np.ndarray:
     """Return stable source-order indices for one overlap-buffered window."""
     cxmin, cymin, cxmax, cymax = core
-    bxmin = cxmin - BLOCK_OVERLAP
-    bymin = cymin - BLOCK_OVERLAP
-    bxmax = cxmax + BLOCK_OVERLAP
-    bymax = cymax + BLOCK_OVERLAP
+    overlap = RUN_SETTINGS.block_overlap
+    bxmin = cxmin - overlap
+    bymin = cymin - overlap
+    bxmax = cxmax + overlap
+    bymax = cymax + overlap
 
     if x_order is None or sorted_x is None:
         return np.flatnonzero(
@@ -910,6 +758,7 @@ def classify_window_job(
             faces: list[np.ndarray] = []
             local_class, local_hag, model = classify_block(
                 local_x, local_y, local_z, local_input_class,
+                RUN_SETTINGS,
                 faces if tin_export is not None else None,
                 tin_export.max_edge if tin_export is not None else 0.0,
             )
@@ -956,7 +805,8 @@ def classify_window_job(
         if dtm_export is not None:
             dtm_path = export_window_dtm(
                 dtm_export, window_number, core,
-                local_x, local_y, local_z, local_class == application_code("ground"),
+                local_x, local_y, local_z,
+                local_class == application_code(RUN_SETTINGS.feature_codes, "ground"),
             )
             log(
                 f"      DTM written: {dtm_path}"
@@ -1196,7 +1046,7 @@ def classify_file(
             f"Neighbour context: {halo_x_usft.size:,} points from "
             f"{len(neighbour_caches)} adjacent file(s), "
             f"{NEIGHBOUR_HALO:.3f} native-unit halo "
-            f"({NEIGHBOUR_HALO_METRES:g} m physical)"
+            f"({RUN_SETTINGS.neighbour_halo_m:g} m physical)"
         )
     else:
         all_x_usft = target_x_usft
@@ -1235,8 +1085,8 @@ def classify_file(
         del halo_x_usft, halo_y_usft, halo_z_usft
 
     classification_out = classification_in.copy()
-    reset_global = reset_input_class_mask(classification_out)
-    classification_out[reset_global] = application_code("unclassified")
+    reset_global = reset_input_class_mask(classification_out, RUN_SETTINGS.feature_codes)
+    classification_out[reset_global] = application_code(RUN_SETTINGS.feature_codes, "unclassified")
     hag_out = np.full(x.size, np.nan, dtype=np.float32)
 
     windows = list(processing_windows(target_x, target_y))
@@ -1267,17 +1117,17 @@ def classify_file(
         )
     tin_export = (
         TinExport(
-            TIN_EXPORT_DIR, input_path.stem, unit_scale, TIN_EXPORT_MAX_EDGE
+            RUN_SETTINGS.tin_export_dir, input_path.stem, unit_scale, RUN_SETTINGS.tin_max_edge
         )
-        if TIN_EXPORT_DIR is not None
+        if RUN_SETTINGS.tin_export_dir is not None
         else None
     )
     dtm_export = (
         DtmExport(
-            DTM_EXPORT_DIR,
+            RUN_SETTINGS.dtm_export_dir,
             input_path.stem,
             unit_scale,
-            DTM_CELL or default_dtm_cell(unit_scale),
+            RUN_SETTINGS.dtm_cell or default_dtm_cell(unit_scale),
             (
                 min(core[0] for _, core in windows),
                 min(core[1] for _, core in windows),
@@ -1285,7 +1135,7 @@ def classify_file(
                 max(core[3] for _, core in windows),
             ),
         )
-        if DTM_EXPORT_DIR is not None
+        if RUN_SETTINGS.dtm_export_dir is not None
         else None
     )
     processing_started = time.perf_counter()
@@ -1339,7 +1189,7 @@ def classify_file(
                 classification_out[:target_point_count] == code
             )
         )
-        for code in FEATURE_CODES.application_codes
+        for code in RUN_SETTINGS.feature_codes.application_codes
     }
     log(
         "Class counts: "
@@ -1991,7 +1841,7 @@ def estimate_target_memory(
             if density is not None and sum(density.counts) == point_count
             else None
         )
-        overlap = BLOCK_OVERLAP / max(unit_scale, 1.0e-9)
+        overlap = RUN_SETTINGS.block_overlap / max(unit_scale, 1.0e-9)
         largest_window = 0
         likely_window = 0
         for core in cores:
@@ -2203,7 +2053,7 @@ def run_batch(
     unit_summary = " and ".join(unit_labels) if unit_labels else "unknown"
     low_veg, medium_veg, high_veg = settings.hag_bands
     low_code, medium_code, high_code = (
-        application_code(name)
+        application_code(settings.feature_codes, name)
         for name in ("low_vegetation", "medium_vegetation", "high_vegetation")
     )
     log(
@@ -2215,9 +2065,9 @@ def run_batch(
     )
     log(
         "Classes: input "
-        + ", ".join(str(code) for code in FEATURE_CODES.mapped_input_feature_codes)
+        + ", ".join(str(code) for code in settings.feature_codes.mapped_input_feature_codes)
         + " re-labelled as "
-        + ", ".join(f"{name} {application_code(name)}" for name in FEATURE_CODES.application_names)
+        + ", ".join(f"{name} {application_code(settings.feature_codes, name)}" for name in settings.feature_codes.application_names)
         + " (see the feature_codes section of the config file)."
     )
 

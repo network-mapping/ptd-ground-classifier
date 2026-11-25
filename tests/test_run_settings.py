@@ -99,10 +99,10 @@ def main():
     # configure_run applies every field, and the defaults put everything back
     try:
         pipeline.configure_run(custom)
-        applied = (pipeline.LOW_VEG_MAX, pipeline.MEDIUM_VEG_MAX, pipeline.HIGH_VEG_MAX, pipeline.NEIGHBOUR_HALO_METRES, pipeline.TIN_EXPORT_DIR,
-                   pipeline.TIN_EXPORT_MAX_EDGE, pipeline.DTM_EXPORT_DIR, pipeline.DTM_CELL, pipeline.BLOCK_SIZE, pipeline.BLOCK_OVERLAP)
-        ok("configure_run: every setting is applied", applied == (0.2, 1.0, 50.0, 25.0, Path("/tmp/tin"), 5.0, Path("/tmp/dtm"), 6.0, 150.0, 40.0), str(applied))
-        ok("configure_run: the engine settings and feature codes too", pipeline.FAST_ENGINE_SETTINGS is custom.engine and pipeline.FEATURE_CODES is custom.feature_codes)
+        ok("configure_run: the pipeline now holds exactly the settings it was given, so every field is applied", pipeline.RUN_SETTINGS is custom)
+        ok("configure_run: and what the windows and exports read from it is what was set",
+           (pipeline.RUN_SETTINGS.block_size, pipeline.RUN_SETTINGS.block_overlap, pipeline.RUN_SETTINGS.tin_export_dir, pipeline.RUN_SETTINGS.dtm_cell)
+           == (150.0, 40.0, Path("/tmp/tin"), 6.0))
         pipeline.configure_input_unit(FEET)
         ok("configure_input_unit: the halo is in the input unit (25 m of feet), and the nominal tile is 1500 ft",
            abs(pipeline.NEIGHBOUR_HALO - 25.0 / FEET) < 1e-9 and pipeline.NOMINAL_TILE_SIZE_USFT == 1500.0, f"{pipeline.NEIGHBOUR_HALO:.3f}")

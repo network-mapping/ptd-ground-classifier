@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 import numpy as np
 
+from ground_classifier import reclassify
+
 CLIPS_DIR = Path(__file__).resolve().parent / "clips"
 CLIPS = {
     "water_edge (honi)": CLIPS_DIR / "water_clip_buffered.npz",
@@ -22,21 +24,21 @@ CLIPS = {
 }
 
 
-def run_one(mod, path):
+def run_one(settings, path):
     data = np.load(path)
     x, y, z, c_input, c_terra, core_mask = (
         data["x"], data["y"], data["z"],
         data["c_input"], data["c_terra"], data["core_mask"],
     )
     t0 = time.perf_counter()
-    classification, hag, model = mod.classify_block(x, y, z, c_input)
+    classification, hag, model = reclassify.classify_block(x, y, z, c_input, settings)
     elapsed = time.perf_counter() - t0
 
     classification = classification[core_mask]
     c_terra_core = c_terra[core_mask]
     n = classification.size
 
-    ours_ground = classification == mod.application_code("ground")
+    ours_ground = classification == reclassify.application_code(settings.feature_codes, "ground")
     terra_ground = c_terra_core == 2
     agree = ours_ground & terra_ground
     fp = ours_ground & ~terra_ground
@@ -59,7 +61,7 @@ def run_one(mod, path):
     }
 
 
-def run_suite(mod, label=""):
+def run_suite(settings, label=""):
     print(f"\n{'='*78}")
     print(f"VALIDATION SUITE{f' - {label}' if label else ''}")
     print(f"{'='*78}")
@@ -67,7 +69,7 @@ def run_suite(mod, label=""):
           f"{'prec%':>8}{'recall%':>8}{'F1':>7}{'FP':>8}{'FN':>8}")
     results = {}
     for name, path in CLIPS.items():
-        r = run_one(mod, path)
+        r = run_one(settings, path)
         results[name] = r
         print(f"{name:<22}{r['n']:>9,}{r['elapsed']:>6.1f}s{r['terra_ground_pct']:>7.1f}%"
               f"{r['our_ground_pct']:>7.1f}%{r['precision']:>7.1f}%{r['recall']:>7.1f}%"
@@ -81,15 +83,9 @@ def run_suite(mod, label=""):
 
 
 if __name__ == "__main__":
-    from ground_classifier import pipeline
-    from ground_classifier.utils.params import RunSettings
     from ground_classifier.utils.args import get_args
     from ground_classifier.utils.config import load_config
 
     # Only the config folder matters here; the input argument is not read.
     config = load_config(get_args([str(CLIPS_DIR)]))
-    pipeline.configure_run(RunSettings(
-        engine=config.engine_settings, hag_bands=config.hag_config.bands, feature_codes=config.feature_codes,
-    ))
-    pipeline.configure_runtime(kdtree_workers=1)
-    run_suite(pipeline, label="ground_classifier.pipeline")
+    run_suite(config.run_settings(), label="ground_classifier.reclassify")
